@@ -211,6 +211,41 @@ jobs:
           echo "ERROR: Server not reachable after 5 minutes"
           exit 1
 
+      - name: Start traffic capture
+        env:
+          SERVER_IP: ${{ steps.resolve-ip.outputs.ip }}
+        run: |
+          CAPTURE_FILE="/tmp/xray-e2e-capture.pcap"
+          # Try tcpdump (may need CAP_NET_RAW)
+          if command -v tcpdump &>/dev/null; then
+            echo "Starting tcpdump capture to $CAPTURE_FILE..."
+            nohup tcpdump -i any -w "$CAPTURE_FILE" host "$SERVER_IP" and port 10443 \
+              > /tmp/tcpdump.log 2>&1 &
+            TCPDUMP_PID=$!
+            sleep 2
+            if kill -0 $TCPDUMP_PID 2>/dev/null; then
+              echo "tcpdump_pid=$TCPDUMP_PID" >> $GITHUB_OUTPUT
+              echo "Capture running (PID $TCPDUMP_PID)"
+            else
+              echo "tcpdump failed to start (likely no permissions)"
+              cat /tmp/tcpdump.log || true
+              echo "Trying with sudo..."
+              sudo nohup tcpdump -i any -w "$CAPTURE_FILE" host "$SERVER_IP" and port 10443 \
+                > /tmp/tcpdump.log 2>&1 &
+              TCPDUMP_PID=$!
+              sleep 2
+              if kill -0 $TCPDUMP_PID 2>/dev/null; then
+                echo "tcpdump_pid=$TCPDUMP_PID" >> $GITHUB_OUTPUT
+                echo "Capture running with sudo (PID $TCPDUMP_PID)"
+              else
+                echo "tcpdump unavailable even with sudo — skipping capture"
+              fi
+            fi
+          else
+            echo "tcpdump not installed — skipping capture"
+          fi
+        id: capture
+
       - name: Run E2E tests against remote server
         env:
           XRAY_BIN: ./xray-linux-amd64
@@ -228,6 +263,22 @@ jobs:
 
           ./testing/e2e/run_tests.sh \
             --server "$SERVER_IP"
+
+      - name: Stop traffic capture
+        if: always()
+        run: |
+          TCPDUMP_PID="${{ steps.capture.outputs.tcpdump_pid }}"
+          if [ -n "$TCPDUMP_PID" ]; then
+            echo "Stopping tcpdump (PID $TCPDUMP_PID)..."
+            kill "$TCPDUMP_PID" 2>/dev/null || sudo kill "$TCPDUMP_PID" 2>/dev/null || true
+            sleep 2
+            if [ -f /tmp/xray-e2e-capture.pcap ]; then
+              SIZE=$(stat -c%s /tmp/xray-e2e-capture.pcap 2>/dev/null || echo 0)
+              echo "Capture file size: $SIZE bytes"
+            fi
+          else
+            echo "No tcpdump was running"
+          fi
 
       - name: Upload traffic capture
         if: always()

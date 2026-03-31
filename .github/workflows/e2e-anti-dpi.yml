@@ -82,15 +82,15 @@ jobs:
         env:
           PRIVATE_KEY: ${{ needs.build.outputs.private_key }}
         run: |
-          sudo mkdir -p /opt/xray-test
-          sudo cp xray-linux-amd64 /opt/xray-test/xray
-          sudo chmod +x /opt/xray-test/xray
+          mkdir -p $HOME/xray-test
+          cp xray-linux-amd64 $HOME/xray-test/xray
+          chmod +x $HOME/xray-test/xray
 
-          sudo tee /opt/xray-test/config.json > /dev/null <<EOF
+          cat > $HOME/xray-test/config.json <<EOF
           {
             "log": {"loglevel": "info"},
             "inbounds": [{
-              "listen": "0.0.0.0", "port": 443, "protocol": "vless",
+              "listen": "0.0.0.0", "port": 10443, "protocol": "vless",
               "settings": {
                 "clients": [{"id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "flow": ""}],
                 "decryption": "none"
@@ -111,11 +111,12 @@ jobs:
 
       - name: Start Xray server
         run: |
-          sudo pkill -f 'xray-test/xray' 2>/dev/null || true
-          sudo nohup /opt/xray-test/xray run -c /opt/xray-test/config.json \
-            > /opt/xray-test/server.log 2>&1 &
+          pkill -f 'xray-test/xray' 2>/dev/null || true
+          nohup $HOME/xray-test/xray run -c $HOME/xray-test/config.json \
+            > $HOME/xray-test/server.log 2>&1 &
           sleep 3
           echo "Server PID: $(pgrep -f 'xray-test/xray')"
+          cat $HOME/xray-test/server.log || true
 
       - name: Report server IP
         id: server-ip

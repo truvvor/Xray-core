@@ -77,12 +77,16 @@ echo ""
 
 # ── Generate REALITY keys ────────────────────────────────────────
 log_info "Generating REALITY key pair..."
-KEYPAIR=$("$XRAY_BIN" x25519 2>/dev/null)
-PRIVATE_KEY=$(echo "$KEYPAIR" | grep "Private" | awk '{print $3}')
-PUBLIC_KEY=$(echo "$KEYPAIR" | grep "Public" | awk '{print $3}')
+KEYPAIR=$("$XRAY_BIN" x25519 2>&1) || true
+log_info "x25519 output: $KEYPAIR"
+PRIVATE_KEY=$(echo "$KEYPAIR" | grep -i "Private" | awk '{print $NF}')
+PUBLIC_KEY=$(echo "$KEYPAIR" | grep -i "Public" | awk '{print $NF}')
 
 if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
     echo "Error: Failed to generate REALITY keys"
+    echo "x25519 full output: $KEYPAIR"
+    echo "Trying alternative: $XRAY_BIN x25519"
+    "$XRAY_BIN" x25519 || true
     exit 1
 fi
 log_info "Keys generated successfully"
@@ -110,7 +114,7 @@ sed -e "s|REPLACE_WITH_SERVER_IP|$SERVER_IP|g" \
 if [ -n "$CAPTURE_FILE" ] && command -v tcpdump &>/dev/null; then
     log_info "Starting traffic capture -> $CAPTURE_FILE"
     if [ "$LOCAL_MODE" = true ]; then
-        tcpdump -i lo -w "$CAPTURE_FILE" port 443 or port 8443 &
+        tcpdump -i lo -w "$CAPTURE_FILE" port 10443 or port 8443 &
     else
         tcpdump -i any -w "$CAPTURE_FILE" host "$SERVER_IP" &
     fi

@@ -21,7 +21,7 @@
         "vnext": [
           {
             "address": "REPLACE_WITH_SERVER_IP",
-            "port": 443,
+            "port": 10443,
             "users": [
               {
                 "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",

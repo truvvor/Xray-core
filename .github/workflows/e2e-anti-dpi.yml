@@ -121,9 +121,9 @@ jobs:
       - name: Report server IP
         id: server-ip
         run: |
-          IP=$(hostname -I | awk '{print $1}')
+          IP=$(curl -s https://ifconfig.me || hostname -I | awk '{print $1}')
           echo "ip=$IP" >> $GITHUB_OUTPUT
-          echo "Server listening on $IP:443"
+          echo "Server listening on $IP:10443"
 
     outputs:
       server_ip: ${{ steps.server-ip.outputs.ip }}

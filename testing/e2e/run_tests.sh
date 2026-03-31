@@ -39,13 +39,13 @@ cleanup() {
         wait "$pid" 2>/dev/null || true
     done
     rm -f /tmp/xray-test-server.json /tmp/xray-test-client.json
-    [ -n "$CAPTURE_FILE" ] && echo "Traffic capture saved to: $CAPTURE_FILE"
+    if [ -n "$CAPTURE_FILE" ]; then echo "Traffic capture saved to: $CAPTURE_FILE"; fi
 }
 trap cleanup EXIT
 
-log_pass() { echo -e "${GREEN}[PASS]${NC} $1"; ((PASSED++)); }
-log_fail() { echo -e "${RED}[FAIL]${NC} $1"; ((FAILED++)); }
-log_skip() { echo -e "${YELLOW}[SKIP]${NC} $1"; ((SKIPPED++)); }
+log_pass() { echo -e "${GREEN}[PASS]${NC} $1"; PASSED=$((PASSED+1)); }
+log_fail() { echo -e "${RED}[FAIL]${NC} $1"; FAILED=$((FAILED+1)); }
+log_skip() { echo -e "${YELLOW}[SKIP]${NC} $1"; SKIPPED=$((SKIPPED+1)); }
 log_info() { echo -e "[ .. ] $1"; }
 
 # ── Argument parsing ──────────────────────────────────────────────
@@ -114,12 +114,17 @@ sed -e "s|REPLACE_WITH_SERVER_IP|$SERVER_IP|g" \
 if [ -n "$CAPTURE_FILE" ] && command -v tcpdump &>/dev/null; then
     log_info "Starting traffic capture -> $CAPTURE_FILE"
     if [ "$LOCAL_MODE" = true ]; then
-        tcpdump -i lo -w "$CAPTURE_FILE" port 10443 or port 8443 &
+        tcpdump -i lo -w "$CAPTURE_FILE" port 10443 or port 8443 &>/dev/null &
     else
-        tcpdump -i any -w "$CAPTURE_FILE" host "$SERVER_IP" &
+        tcpdump -i any -w "$CAPTURE_FILE" host "$SERVER_IP" &>/dev/null &
     fi
-    cleanup_pids+=($!)
-    sleep 1
+    if [ $? -eq 0 ]; then
+        cleanup_pids+=($!)
+        sleep 1
+    else
+        log_info "tcpdump failed (no permissions) — skipping capture"
+        CAPTURE_FILE=""
+    fi
 fi
 
 # ── Start server (local mode only) ───────────────────────────────

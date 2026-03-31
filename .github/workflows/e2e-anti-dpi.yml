@@ -71,10 +71,11 @@ jobs:
           XRAY_BIN: ./xray-linux-amd64
         run: ./testing/e2e/run_tests.sh --local
 
-  # ── Job 3: Deploy server to self-hosted runner ──────────────────
+  # ── Job 3: Deploy server (stays alive while tests run) ──────────
   deploy-server:
     needs: build
     runs-on: ${{ github.event.inputs.server_runner || 'xray-server' }}
+    timeout-minutes: 20
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -117,10 +118,19 @@ jobs:
       - name: Start Xray server
         run: |
           pkill -f 'xray-test/xray' 2>/dev/null || true
+          sleep 1
           nohup $HOME/xray-test/xray run -c $HOME/xray-test/config.json \
             > $HOME/xray-test/server.log 2>&1 &
+          XRAY_PID=$!
           sleep 3
-          echo "Server PID: $(pgrep -f 'xray-test/xray')"
+
+          if ! kill -0 $XRAY_PID 2>/dev/null; then
+            echo "ERROR: Xray server failed to start!"
+            cat $HOME/xray-test/server.log
+            exit 1
+          fi
+
+          echo "Server PID: $XRAY_PID"
           cat $HOME/xray-test/server.log || true
 
       - name: Report server IP
@@ -134,18 +144,35 @@ jobs:
             IP=$(curl -s --max-time 5 https://ifconfig.me 2>/dev/null || curl -s --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
             echo "Auto-detected public IP: $IP"
           fi
-          echo "hostname -I output: $(hostname -I)"
-          echo "hostname: $(hostname)"
           echo "ip=$IP" >> $GITHUB_OUTPUT
           echo "Server listening on $IP:10443"
+
+      - name: Keep server alive for tests
+        run: |
+          echo "Keeping server alive while tests run..."
+          echo "Will stay up for up to 15 minutes."
+          for i in $(seq 1 90); do
+            if ! pgrep -f 'xray-test/xray' > /dev/null; then
+              echo "Xray process died at iteration $i, restarting..."
+              nohup $HOME/xray-test/xray run -c $HOME/xray-test/config.json \
+                > $HOME/xray-test/server.log 2>&1 &
+              sleep 2
+            fi
+            sleep 10
+          done
+          echo "Server keepalive finished."
 
     outputs:
       server_ip: ${{ steps.server-ip.outputs.ip }}
 
-  # ── Job 4: Run tests from client runner ─────────────────────────
+  # ── Job 4: Run tests from client runner (concurrent with server) ─
   test-remote:
-    needs: [build, deploy-server]
+    needs: [build]
     runs-on: ${{ github.event.inputs.client_runner || 'xray-client' }}
+    # Server IP: use workflow input if available, otherwise default
+    env:
+      SERVER_IP_INPUT: ${{ github.event.inputs.server_ip }}
+      PUBLIC_KEY: ${{ needs.build.outputs.public_key }}
     steps:
       - uses: actions/checkout@v6
 
@@ -156,14 +183,41 @@ jobs:
       - name: Prepare binary
         run: chmod +x xray-linux-amd64
 
+      - name: Determine server IP
+        id: resolve-ip
+        run: |
+          if [ -n "$SERVER_IP_INPUT" ]; then
+            echo "ip=$SERVER_IP_INPUT" >> $GITHUB_OUTPUT
+            echo "Using workflow input IP: $SERVER_IP_INPUT"
+          else
+            # Default server IP - update this if your server changes
+            echo "ip=77.90.8.199" >> $GITHUB_OUTPUT
+            echo "Using default server IP: 77.90.8.199"
+          fi
+
+      - name: Wait for server to be ready
+        env:
+          SERVER_IP: ${{ steps.resolve-ip.outputs.ip }}
+        run: |
+          echo "Waiting for Xray server at $SERVER_IP:10443..."
+          for i in $(seq 1 60); do
+            if timeout 3 bash -c "echo | nc -w2 $SERVER_IP 10443" 2>/dev/null; then
+              echo "Server is ready! (attempt $i)"
+              exit 0
+            fi
+            echo "Waiting... attempt $i/60"
+            sleep 5
+          done
+          echo "ERROR: Server not reachable after 5 minutes"
+          exit 1
+
       - name: Run E2E tests against remote server
         env:
           XRAY_BIN: ./xray-linux-amd64
-          SERVER_IP: ${{ needs.deploy-server.outputs.server_ip }}
-          PUBLIC_KEY: ${{ needs.build.outputs.public_key }}
+          SERVER_IP: ${{ steps.resolve-ip.outputs.ip }}
         run: |
-          echo "Server IP from deploy-server: $SERVER_IP"
-          echo "Public key from build: $PUBLIC_KEY"
+          echo "Server IP: $SERVER_IP"
+          echo "Public key: $PUBLIC_KEY"
 
           # Patch client config with actual values
           sed -i "s|REPLACE_WITH_SERVER_IP|$SERVER_IP|g" testing/configs/client.json
@@ -171,10 +225,6 @@ jobs:
 
           echo "Client config:"
           cat testing/configs/client.json
-
-          # Quick connectivity check
-          echo "Testing raw TCP connectivity to $SERVER_IP:10443..."
-          timeout 5 bash -c "echo | nc -w3 $SERVER_IP 10443" && echo "Port open" || echo "Port closed/unreachable"
 
           ./testing/e2e/run_tests.sh \
             --server "$SERVER_IP"

@@ -144,7 +144,9 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 		hello.SessionId[1] = core.Version_y
 		hello.SessionId[2] = core.Version_z
 		hello.SessionId[3] = 0 // reserved
-		binary.BigEndian.PutUint32(hello.SessionId[4:], uint32(time.Now().Unix()))
+		// Anti-DPI: add random jitter to timestamp to prevent correlation with real time
+		timestampJitter := crypto.RandBetween(-300, 300)
+		binary.BigEndian.PutUint32(hello.SessionId[4:], uint32(int64(time.Now().Unix())+timestampJitter))
 		copy(hello.SessionId[8:], config.ShortId)
 		if config.Show {
 			fmt.Printf("REALITY localAddr: %v\thello.SessionId[:16]: %v\n", localAddr, hello.SessionId[:16])

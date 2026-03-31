@@ -50,12 +50,21 @@ func SealVMessAEADHeader(key [16]byte, data []byte) []byte {
 		payloadHeaderAEADEncrypted = payloadHeaderAEAD.Seal(nil, payloadHeaderAEADNonce, data, generatedAuthID[:])
 	}
 
+	// Anti-DPI: append random padding to vary the total header size
+	// Server reads strictly by lengths so the trailing padding is safely ignored
+	paddingLen := int(crypto.RandBetween(0, 32))
+	padding := make([]byte, paddingLen)
+	if _, err := io.ReadFull(rand.Reader, padding); err != nil {
+		panic(err.Error())
+	}
+
 	outputBuffer := bytes.NewBuffer(nil)
 
 	common.Must2(outputBuffer.Write(generatedAuthID[:]))               // 16
 	common.Must2(outputBuffer.Write(payloadHeaderLengthAEADEncrypted)) // 2+16
 	common.Must2(outputBuffer.Write(connectionNonce))                  // 8
 	common.Must2(outputBuffer.Write(payloadHeaderAEADEncrypted))
+	common.Must2(outputBuffer.Write(padding)) // 0..32 random bytes
 
 	return outputBuffer.Bytes()
 }

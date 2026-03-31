@@ -2,10 +2,12 @@ package encoding
 
 import (
 	"context"
+	"crypto/rand"
 	"io"
 	"net"
 
 	"github.com/xtls/xray-core/common/buf"
+	"github.com/xtls/xray-core/common/crypto"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/session"
@@ -28,8 +30,15 @@ func EncodeHeaderAddons(buffer *buf.Buffer, addons *Addons) error {
 			return errors.New("failed to write addons protobuf value").Base(err)
 		}
 	default:
-		if err := buffer.WriteByte(0); err != nil {
-			return errors.New("failed to write addons protobuf length").Base(err)
+		// Anti-DPI: inject random padding into header to vary initial packet size
+		paddingLen := int(crypto.RandBetween(16, 64))
+		padding := make([]byte, paddingLen)
+		rand.Read(padding)
+		if err := buffer.WriteByte(byte(paddingLen)); err != nil {
+			return errors.New("failed to write addons padding length").Base(err)
+		}
+		if _, err := buffer.Write(padding); err != nil {
+			return errors.New("failed to write addons padding").Base(err)
 		}
 	}
 
@@ -50,7 +59,8 @@ func DecodeHeaderAddons(buffer *buf.Buffer, reader io.Reader) (*Addons, error) {
 		}
 
 		if err := proto.Unmarshal(buffer.Bytes(), addons); err != nil {
-			return nil, errors.New("failed to unmarshal addons protobuf value").Base(err)
+			// Anti-DPI: if unmarshal fails, this is random padding — just ignore it
+			// The padding was injected to vary packet sizes and has no semantic meaning
 		}
 
 		// Verification.

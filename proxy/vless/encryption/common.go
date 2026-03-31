@@ -52,8 +52,10 @@ func (c *CommonConn) Write(b []byte) (int, error) {
 	defer OutBytesPool.Put(outBytes)
 	for n := 0; n < len(b); {
 		b := b[n:]
-		if len(b) > 8192 {
-			b = b[:8192] // for avoiding another copy() in peer's Read()
+		// Randomize record size to defeat DPI statistical analysis on fixed-size records
+		maxRecordSize := 4096 + int(crypto.RandBetween(0, 4096)) // 4096..8192
+		if len(b) > maxRecordSize {
+			b = b[:maxRecordSize]
 		}
 		n += len(b)
 		headerAndData := outBytes[:5+len(b)+16]

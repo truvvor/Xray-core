@@ -68,7 +68,11 @@ fi
 
 echo "=== Xray Anti-DPI E2E Tests ==="
 echo "Binary: $XRAY_BIN"
-echo "Mode:   $([ "$LOCAL_MODE" = true ] && echo 'local loopback' || echo "remote ($SERVER_IP")")"
+if [ "$LOCAL_MODE" = true ]; then
+    echo "Mode:   local loopback"
+else
+    echo "Mode:   remote ($SERVER_IP)"
+fi
 echo ""
 
 # ── Generate REALITY keys ────────────────────────────────────────

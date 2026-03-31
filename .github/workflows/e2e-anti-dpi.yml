@@ -82,10 +82,11 @@ jobs:
         env:
           PRIVATE_KEY: ${{ needs.build.outputs.private_key }}
         run: |
-          mkdir -p /opt/xray-test
-          cp xray-linux-amd64 /opt/xray-test/xray
+          sudo mkdir -p /opt/xray-test
+          sudo cp xray-linux-amd64 /opt/xray-test/xray
+          sudo chmod +x /opt/xray-test/xray
 
-          cat > /opt/xray-test/config.json <<EOF
+          sudo tee /opt/xray-test/config.json > /dev/null <<EOF
           {
             "log": {"loglevel": "info"},
             "inbounds": [{
@@ -110,8 +111,8 @@ jobs:
 
       - name: Start Xray server
         run: |
-          pkill -f 'xray-test/xray' 2>/dev/null || true
-          nohup /opt/xray-test/xray run -c /opt/xray-test/config.json \
+          sudo pkill -f 'xray-test/xray' 2>/dev/null || true
+          sudo nohup /opt/xray-test/xray run -c /opt/xray-test/config.json \
             > /opt/xray-test/server.log 2>&1 &
           sleep 3
           echo "Server PID: $(pgrep -f 'xray-test/xray')"

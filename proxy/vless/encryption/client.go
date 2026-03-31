@@ -66,7 +66,10 @@ func (i *ClientInstance) Handshake(conn net.Conn) (*CommonConn, error) {
 	if i.NfsPKeys == nil {
 		return nil, errors.New("uninitialized")
 	}
-	c := NewCommonConn(conn, protocol.HasAESGCMHardwareSupport)
+	// Anti-DPI: scatter TLS records across TCP segments to break record-boundary alignment.
+	// First 50 writes are scattered into 64-512 byte chunks with up to 2ms jitter.
+	scatteredConn := NewScatterConn(conn, 64, 512, 50, 2)
+	c := NewCommonConn(scatteredConn, protocol.HasAESGCMHardwareSupport)
 
 	ivAndRealysLength := 16 + i.RelaysLength
 	pfsKeyExchangeLength := 18 + 1184 + 32 + 16

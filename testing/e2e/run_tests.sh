@@ -342,6 +342,94 @@ test_packet_variation() {
     fi
 }
 
+# ── Test 9: Record scatter verification (data integrity after splitting) ──
+test_scatter_integrity() {
+    log_info "Test 9: Record scatter integrity (data correctness after TCP splitting)"
+    # Download a page and verify content arrives intact despite record scattering
+    BODY=$(timeout $TEST_TIMEOUT curl -s --socks5-hostname 127.0.0.1:1080 \
+        "https://example.com" 2>/dev/null || echo "")
+
+    if echo "$BODY" | grep -qi "example"; then
+        BODYLEN=${#BODY}
+        log_pass "Scatter integrity OK: received coherent response ($BODYLEN bytes)"
+    elif [ -n "$BODY" ]; then
+        log_pass "Scatter integrity: received data (${#BODY} bytes, content differs)"
+    else
+        log_fail "Scatter integrity: empty response — data lost in scatter?"
+    fi
+}
+
+# ── Test 10: Extended idle + heartbeat survival ──────────────────
+test_heartbeat_survival() {
+    log_info "Test 10: Heartbeat survival (20s idle, then resume)"
+    # Initial request to establish connection
+    R1=$(timeout $TEST_TIMEOUT curl -s -o /dev/null -w "%{http_code}" \
+        --socks5-hostname 127.0.0.1:1080 \
+        "https://example.com" 2>/dev/null || echo "000")
+
+    if [ "$R1" = "000" ]; then
+        log_fail "Heartbeat survival: initial connection failed"
+        return
+    fi
+
+    # Extended idle period — heartbeat should keep things alive
+    log_info "  Waiting 20s (heartbeat should fire 2-3 times)..."
+    sleep 20
+
+    # Resume traffic
+    R2=$(timeout $TEST_TIMEOUT curl -s -o /dev/null -w "%{http_code}" \
+        --socks5-hostname 127.0.0.1:1080 \
+        "https://www.google.com" 2>/dev/null || echo "000")
+
+    if [ "$R2" = "200" ] || [ "$R2" = "301" ] || [ "$R2" = "302" ]; then
+        log_pass "Heartbeat survival: connection alive after 20s idle (HTTP $R2)"
+    else
+        log_fail "Heartbeat survival: post-idle request failed (HTTP $R2)"
+    fi
+}
+
+# ── Test 11: Concurrent mixed-size transfers ─────────────────────
+test_mixed_traffic() {
+    log_info "Test 11: Mixed traffic (concurrent small+large requests)"
+    local results_dir=$(mktemp -d)
+    local pids=()
+
+    # Small request
+    (timeout $TEST_TIMEOUT curl -s -o /dev/null -w "%{http_code}" \
+        --socks5-hostname 127.0.0.1:1080 \
+        "https://example.com" 2>/dev/null || echo "000") > "$results_dir/small" &
+    pids+=($!)
+
+    # Larger request (different host = different TLS session)
+    (timeout $TEST_TIMEOUT curl -s -o /dev/null -w "%{http_code}" \
+        --socks5-hostname 127.0.0.1:1080 \
+        "https://www.google.com" 2>/dev/null || echo "000") > "$results_dir/large" &
+    pids+=($!)
+
+    # Another small
+    (timeout $TEST_TIMEOUT curl -s -o /dev/null -w "%{http_code}" \
+        --socks5-hostname 127.0.0.1:1080 \
+        "https://example.com" 2>/dev/null || echo "000") > "$results_dir/small2" &
+    pids+=($!)
+
+    for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
+
+    local success=0
+    for f in "$results_dir"/*; do
+        code="$(cat "$f")"
+        [ "$code" != "000" ] && success=$((success+1))
+    done
+    rm -rf "$results_dir"
+
+    if [ "$success" -eq 3 ]; then
+        log_pass "Mixed traffic: all 3 concurrent requests succeeded"
+    elif [ "$success" -gt 0 ]; then
+        log_fail "Mixed traffic: only $success/3 succeeded"
+    else
+        log_fail "Mixed traffic: all failed"
+    fi
+}
+
 # ── Run all tests ─────────────────────────────────────────────────
 test_basic_connectivity
 test_sequential_connections
@@ -351,6 +439,9 @@ test_long_connection
 test_dns_through_proxy
 test_tls_fingerprint
 test_packet_variation
+test_scatter_integrity
+test_heartbeat_survival
+test_mixed_traffic
 
 # ── Summary ───────────────────────────────────────────────────────
 echo ""

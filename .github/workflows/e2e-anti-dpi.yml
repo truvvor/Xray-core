@@ -250,29 +250,147 @@ jobs:
       - name: Install tshark
         run: sudo apt-get update && sudo apt-get install -y tshark
 
-      - name: Analyze packet sizes
+      - name: DPI Resistance Analysis
         if: hashFiles('xray-e2e-capture.pcap') != ''
         run: |
-          echo "=== Packet Size Distribution ==="
-          tshark -r xray-e2e-capture.pcap -Y "tcp.len > 0" \
-            -T fields -e tcp.len | sort -n | uniq -c | sort -rn | head -20
+          PCAP="xray-e2e-capture.pcap"
+          SCORE=100  # Start with perfect score, deduct for DPI-detectable patterns
 
+          echo "╔══════════════════════════════════════════════════╗"
+          echo "║         DPI RESISTANCE SCORE ANALYSIS            ║"
+          echo "╚══════════════════════════════════════════════════╝"
           echo ""
-          echo "=== Inter-Arrival Times (ms) ==="
-          tshark -r xray-e2e-capture.pcap -Y "tcp.len > 0" \
-            -T fields -e frame.time_delta_displayed | head -50
 
-          echo ""
-          echo "=== TLS Client Hello Analysis ==="
-          tshark -r xray-e2e-capture.pcap -Y "tls.handshake.type == 1" \
-            -T fields -e tls.handshake.ja3_full 2>/dev/null || echo "No JA3 data"
+          # ── 1. Packet Size Entropy ──────────────────────────
+          echo "=== 1. Packet Size Distribution ==="
+          SIZES=$(tshark -r "$PCAP" -Y "tcp.len > 0" -T fields -e tcp.len 2>/dev/null)
+          TOTAL=$(echo "$SIZES" | wc -l)
+          UNIQUE=$(echo "$SIZES" | sort -u | wc -l)
 
+          if [ "$TOTAL" -gt 0 ]; then
+            DIVERSITY=$(echo "scale=1; $UNIQUE * 100 / $TOTAL" | bc)
+            echo "Total data packets: $TOTAL"
+            echo "Unique payload sizes: $UNIQUE"
+            echo "Size diversity: ${DIVERSITY}%"
+            echo "$SIZES" | sort -n | uniq -c | sort -rn | head -10
+
+            # Deduct if diversity is low (DPI can fingerprint fixed patterns)
+            DIV_INT=${DIVERSITY%.*}
+            if [ "$DIV_INT" -lt 10 ]; then
+              PENALTY=25
+              echo "⚠ LOW diversity (<10%) — easily fingerprinted. Penalty: -$PENALTY"
+              SCORE=$((SCORE - PENALTY))
+            elif [ "$DIV_INT" -lt 30 ]; then
+              PENALTY=10
+              echo "⚠ MODERATE diversity (<30%). Penalty: -$PENALTY"
+              SCORE=$((SCORE - PENALTY))
+            else
+              echo "✓ Good size diversity"
+            fi
+          fi
           echo ""
-          echo "=== Summary Statistics ==="
-          TOTAL=$(tshark -r xray-e2e-capture.pcap -Y "tcp.len > 0" \
-            -T fields -e tcp.len | wc -l)
-          UNIQUE=$(tshark -r xray-e2e-capture.pcap -Y "tcp.len > 0" \
-            -T fields -e tcp.len | sort -u | wc -l)
-          echo "Total data packets: $TOTAL"
-          echo "Unique payload sizes: $UNIQUE"
-          echo "Size diversity ratio: $(echo "scale=2; $UNIQUE * 100 / $TOTAL" | bc)%"
+
+          # ── 2. Record-TCP Alignment Check ───────────────────
+          echo "=== 2. TLS Record / TCP Segment Alignment ==="
+          # Count packets whose size matches common TLS record sizes (±5 bytes of multiples)
+          ALIGNED=0
+          for s in 1400 1448 1460 8192 4096 16384; do
+            LO=$((s - 5))
+            HI=$((s + 5))
+            COUNT=$(echo "$SIZES" | awk -v lo="$LO" -v hi="$HI" '$1 >= lo && $1 <= hi' | wc -l)
+            ALIGNED=$((ALIGNED + COUNT))
+          done
+          if [ "$TOTAL" -gt 0 ]; then
+            ALIGN_PCT=$(echo "scale=1; $ALIGNED * 100 / $TOTAL" | bc)
+            echo "Packets near standard sizes: $ALIGNED/${TOTAL} (${ALIGN_PCT}%)"
+            ALIGN_INT=${ALIGN_PCT%.*}
+            if [ "$ALIGN_INT" -gt 50 ]; then
+              PENALTY=20
+              echo "⚠ HIGH alignment to standard sizes — DPI detectable. Penalty: -$PENALTY"
+              SCORE=$((SCORE - PENALTY))
+            elif [ "$ALIGN_INT" -gt 25 ]; then
+              PENALTY=10
+              echo "⚠ MODERATE alignment. Penalty: -$PENALTY"
+              SCORE=$((SCORE - PENALTY))
+            else
+              echo "✓ Good scatter — records don't align with TCP segments"
+            fi
+          fi
+          echo ""
+
+          # ── 3. Inter-Arrival Time Analysis ──────────────────
+          echo "=== 3. Timing Analysis ==="
+          TIMES=$(tshark -r "$PCAP" -Y "tcp.len > 0" \
+            -T fields -e frame.time_delta_displayed 2>/dev/null | head -200)
+          ZERO_DELTA=$(echo "$TIMES" | awk '$1 < 0.001' | wc -l)
+          TOTAL_TIMES=$(echo "$TIMES" | wc -l)
+
+          if [ "$TOTAL_TIMES" -gt 0 ]; then
+            BURST_PCT=$(echo "scale=1; $ZERO_DELTA * 100 / $TOTAL_TIMES" | bc)
+            echo "Near-zero inter-arrival (<1ms): $ZERO_DELTA/${TOTAL_TIMES} (${BURST_PCT}%)"
+            BURST_INT=${BURST_PCT%.*}
+            if [ "$BURST_INT" -gt 80 ]; then
+              PENALTY=15
+              echo "⚠ HIGH burst ratio — looks like tunneled traffic. Penalty: -$PENALTY"
+              SCORE=$((SCORE - PENALTY))
+            else
+              echo "✓ Timing looks natural"
+            fi
+          fi
+          echo ""
+
+          # ── 4. TLS Fingerprint Check ────────────────────────
+          echo "=== 4. TLS Fingerprint ==="
+          JA3=$(tshark -r "$PCAP" -Y "tls.handshake.type == 1" \
+            -T fields -e tls.handshake.ja3_full 2>/dev/null | head -5)
+          if [ -n "$JA3" ]; then
+            JA3_UNIQUE=$(echo "$JA3" | sort -u | wc -l)
+            JA3_TOTAL=$(echo "$JA3" | wc -l)
+            echo "JA3 fingerprints: $JA3_TOTAL total, $JA3_UNIQUE unique"
+            echo "$JA3" | head -3
+            if [ "$JA3_UNIQUE" -eq 1 ] && [ "$JA3_TOTAL" -gt 3 ]; then
+              PENALTY=10
+              echo "⚠ Single JA3 fingerprint across all connections. Penalty: -$PENALTY"
+              SCORE=$((SCORE - PENALTY))
+            else
+              echo "✓ JA3 variation present"
+            fi
+          else
+            echo "✓ No JA3 data (REALITY/uTLS fingerprint masking working)"
+          fi
+          echo ""
+
+          # ── 5. Repeated Pattern Detection ───────────────────
+          echo "=== 5. Repeated Byte Patterns ==="
+          # Check if many packets start with the same bytes (fingerprint)
+          FIRST_BYTES=$(tshark -r "$PCAP" -Y "tcp.len > 5" \
+            -T fields -e tcp.payload 2>/dev/null | cut -c1-10 | sort | uniq -c | sort -rn | head -5)
+          if [ -n "$FIRST_BYTES" ]; then
+            TOP_COUNT=$(echo "$FIRST_BYTES" | head -1 | awk '{print $1}')
+            if [ "$TOTAL" -gt 0 ] && [ "$TOP_COUNT" -gt $((TOTAL / 3)) ]; then
+              PENALTY=15
+              echo "⚠ Dominant repeated header pattern. Penalty: -$PENALTY"
+              SCORE=$((SCORE - PENALTY))
+            else
+              echo "✓ No dominant byte patterns"
+            fi
+            echo "$FIRST_BYTES"
+          fi
+          echo ""
+
+          # ── Final Score ─────────────────────────────────────
+          echo "╔══════════════════════════════════════════════════╗"
+          if [ "$SCORE" -ge 80 ]; then
+            echo "║  DPI RESISTANCE SCORE: ${SCORE}/100 — EXCELLENT     ║"
+          elif [ "$SCORE" -ge 60 ]; then
+            echo "║  DPI RESISTANCE SCORE: ${SCORE}/100 — GOOD          ║"
+          elif [ "$SCORE" -ge 40 ]; then
+            echo "║  DPI RESISTANCE SCORE: ${SCORE}/100 — MODERATE      ║"
+          else
+            echo "║  DPI RESISTANCE SCORE: ${SCORE}/100 — NEEDS WORK    ║"
+          fi
+          echo "╚══════════════════════════════════════════════════╝"
+
+      - name: No capture available
+        if: hashFiles('xray-e2e-capture.pcap') == ''
+        run: echo "No traffic capture available — skipping DPI analysis"

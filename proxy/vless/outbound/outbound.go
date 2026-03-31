@@ -292,6 +292,12 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		}
 	default:
 		ob.CanSpliceCopy = 3
+		// Anti-DPI: wrap non-XTLS connections with heartbeat to generate
+		// fake TLS keepalive traffic during idle periods, mimicking real
+		// browser behavior and preventing DPI timeout fingerprinting.
+		if h.encryption != nil {
+			conn = encryption.NewHeartbeatConn(conn, 5000, 15000)
+		}
 	}
 
 	var newCtx context.Context

@@ -52,8 +52,22 @@ func (c *CommonConn) Write(b []byte) (int, error) {
 	defer OutBytesPool.Put(outBytes)
 	for n := 0; n < len(b); {
 		b := b[n:]
-		// Randomize record size to defeat DPI statistical analysis on fixed-size records
-		maxRecordSize := 4096 + int(crypto.RandBetween(0, 4096)) // 4096..8192
+		// Anti-DPI: randomize record sizes with a distribution that mimics real
+		// TLS traffic. Real connections produce varied record sizes depending on
+		// HTTP chunking, compression, and application behavior.
+		var maxRecordSize int
+		dice := crypto.RandBetween(0, 100)
+		switch {
+		case dice < 10:
+			// 10%: small records (256-1024), mimics short HTTP responses/headers
+			maxRecordSize = 256 + int(crypto.RandBetween(0, 768))
+		case dice < 30:
+			// 20%: medium records (1024-4096), common for chunked content
+			maxRecordSize = 1024 + int(crypto.RandBetween(0, 3072))
+		default:
+			// 70%: large records (4096-8192), bulk data transfers
+			maxRecordSize = 4096 + int(crypto.RandBetween(0, 4096))
+		}
 		if len(b) > maxRecordSize {
 			b = b[:maxRecordSize]
 		}

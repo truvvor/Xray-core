@@ -118,7 +118,9 @@ func (i *ServerInstance) Handshake(conn net.Conn, fallback *[]byte) (*CommonConn
 	if i.NfsSKeys == nil {
 		return nil, errors.New("uninitialized")
 	}
-	c := NewCommonConn(conn, true)
+	// Anti-DPI: scatter TLS records across TCP segments (server side)
+	scatteredConn := NewScatterConn(conn, 64, 512, 50, 2)
+	c := NewCommonConn(scatteredConn, true)
 
 	ivAndRelays := make([]byte, 16+i.RelaysLength)
 	if _, err := io.ReadFull(conn, ivAndRelays); err != nil {

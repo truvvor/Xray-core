@@ -15,6 +15,10 @@ on:
         description: 'Self-hosted runner label for the CLIENT machine'
         required: true
         default: 'xray-client'
+      server_ip:
+        description: 'Public IP of the server (leave empty for auto-detect)'
+        required: false
+        default: ''
 
 jobs:
   # ── Job 1: Build the binary ─────────────────────────────────────
@@ -121,9 +125,16 @@ jobs:
       - name: Report server IP
         id: server-ip
         run: |
-          IP=$(curl -s --max-time 5 https://ifconfig.me 2>/dev/null || curl -s --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
-          echo "Detected public IP: $IP"
+          MANUAL_IP="${{ github.event.inputs.server_ip }}"
+          if [ -n "$MANUAL_IP" ]; then
+            IP="$MANUAL_IP"
+            echo "Using manually specified IP: $IP"
+          else
+            IP=$(curl -s --max-time 5 https://ifconfig.me 2>/dev/null || curl -s --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
+            echo "Auto-detected public IP: $IP"
+          fi
           echo "hostname -I output: $(hostname -I)"
+          echo "hostname: $(hostname)"
           echo "ip=$IP" >> $GITHUB_OUTPUT
           echo "Server listening on $IP:10443"
 

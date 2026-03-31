@@ -167,7 +167,9 @@ test_basic_connectivity() {
     log_info "Test 1: Basic connectivity (VLESS+REALITY)"
     RESP=$(timeout $TEST_TIMEOUT curl -s -o /dev/null -w "%{http_code}" \
         --socks5-hostname 127.0.0.1:1080 \
-        https://example.com 2>/dev/null || echo "000")
+        https://example.com 2>/dev/null) || true
+
+    if [ -z "$RESP" ]; then RESP="000"; fi
 
     if [ "$RESP" = "200" ] || [ "$RESP" = "301" ] || [ "$RESP" = "302" ]; then
         log_pass "Basic HTTPS request through VLESS+REALITY (HTTP $RESP)"

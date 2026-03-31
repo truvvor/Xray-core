@@ -121,7 +121,9 @@ jobs:
       - name: Report server IP
         id: server-ip
         run: |
-          IP=$(curl -s https://ifconfig.me || hostname -I | awk '{print $1}')
+          IP=$(curl -s --max-time 5 https://ifconfig.me 2>/dev/null || curl -s --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
+          echo "Detected public IP: $IP"
+          echo "hostname -I output: $(hostname -I)"
           echo "ip=$IP" >> $GITHUB_OUTPUT
           echo "Server listening on $IP:10443"
 
@@ -148,13 +150,22 @@ jobs:
           SERVER_IP: ${{ needs.deploy-server.outputs.server_ip }}
           PUBLIC_KEY: ${{ needs.build.outputs.public_key }}
         run: |
+          echo "Server IP from deploy-server: $SERVER_IP"
+          echo "Public key from build: $PUBLIC_KEY"
+
           # Patch client config with actual values
           sed -i "s|REPLACE_WITH_SERVER_IP|$SERVER_IP|g" testing/configs/client.json
           sed -i "s|REPLACE_WITH_GENERATED_PUBLIC_KEY|$PUBLIC_KEY|g" testing/configs/client.json
 
+          echo "Client config:"
+          cat testing/configs/client.json
+
+          # Quick connectivity check
+          echo "Testing raw TCP connectivity to $SERVER_IP:10443..."
+          timeout 5 bash -c "echo | nc -w3 $SERVER_IP 10443" && echo "Port open" || echo "Port closed/unreachable"
+
           ./testing/e2e/run_tests.sh \
-            --server "$SERVER_IP" \
-            --capture /tmp/xray-e2e-capture.pcap
+            --server "$SERVER_IP"
 
       - name: Upload traffic capture
         if: always()

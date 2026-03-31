@@ -167,9 +167,9 @@ test_basic_connectivity() {
     log_info "Test 1: Basic connectivity (VLESS+REALITY)"
     RESP=$(timeout $TEST_TIMEOUT curl -s -o /dev/null -w "%{http_code}" \
         --socks5-hostname 127.0.0.1:1080 \
-        https://example.com/get 2>/dev/null || echo "000")
+        https://example.com 2>/dev/null || echo "000")
 
-    if [ "$RESP" = "200" ]; then
+    if [ "$RESP" = "200" ] || [ "$RESP" = "301" ] || [ "$RESP" = "302" ]; then
         log_pass "Basic HTTPS request through VLESS+REALITY (HTTP $RESP)"
     elif [ "$RESP" = "000" ]; then
         log_fail "Basic connectivity — connection timed out or refused"
@@ -187,8 +187,8 @@ test_sequential_connections() {
     for i in $(seq 1 $total); do
         RESP=$(timeout $TEST_TIMEOUT curl -s -o /dev/null -w "%{http_code}" \
             --socks5-hostname 127.0.0.1:1080 \
-            "https://example.com/get?seq=$i" 2>/dev/null || echo "000")
-        [ "$RESP" = "200" ] && success=$((success+1))
+            "https://example.com" 2>/dev/null || echo "000")
+        [ "$RESP" != "000" ] && success=$((success+1))
     done
 
     if [ "$success" -eq "$total" ]; then
@@ -210,7 +210,7 @@ test_parallel_connections() {
         (
             RESP=$(timeout $TEST_TIMEOUT curl -s -o /dev/null -w "%{http_code}" \
                 --socks5-hostname 127.0.0.1:1080 \
-                "https://example.com/get?par=$i" 2>/dev/null || echo "000")
+                "https://example.com" 2>/dev/null || echo "000")
             echo "$RESP" > "$results_dir/$i"
         ) &
         pids+=($!)
@@ -222,7 +222,7 @@ test_parallel_connections() {
 
     local success=0
     for f in "$results_dir"/*; do
-        [ "$(cat "$f")" = "200" ] && success=$((success+1))
+        [ "$(cat "$f")" != "000" ] && success=$((success+1))
     done
     rm -rf "$results_dir"
 

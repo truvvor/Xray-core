@@ -1,0 +1,206 @@
+name: Anti-DPI E2E Tests
+
+on:
+  push:
+    branches: [claude/optimize-encryption-dpi-*]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      server_runner:
+        description: 'Self-hosted runner label for the SERVER machine'
+        required: true
+        default: 'xray-server'
+      client_runner:
+        description: 'Self-hosted runner label for the CLIENT machine'
+        required: true
+        default: 'xray-client'
+
+jobs:
+  # ── Job 1: Build the binary ─────────────────────────────────────
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Build xray (linux/amd64)
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o xray-linux-amd64 ./main
+
+      - name: Generate REALITY keys
+        id: keys
+        run: |
+          KEYPAIR=$(./xray-linux-amd64 x25519)
+          echo "private_key=$(echo "$KEYPAIR" | grep Private | awk '{print $3}')" >> $GITHUB_OUTPUT
+          echo "public_key=$(echo "$KEYPAIR" | grep Public | awk '{print $3}')" >> $GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xray-binary
+          path: xray-linux-amd64
+
+    outputs:
+      private_key: ${{ steps.keys.outputs.private_key }}
+      public_key: ${{ steps.keys.outputs.public_key }}
+
+  # ── Job 2: Local loopback test (no extra machines needed) ───────
+  test-local:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: xray-binary
+
+      - name: Prepare binary
+        run: chmod +x xray-linux-amd64
+
+      - name: Run local E2E tests
+        env:
+          XRAY_BIN: ./xray-linux-amd64
+        run: ./testing/e2e/run_tests.sh --local
+
+  # ── Job 3: Deploy server to self-hosted runner ──────────────────
+  deploy-server:
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ${{ github.event.inputs.server_runner || 'xray-server' }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: xray-binary
+
+      - name: Prepare binary
+        run: chmod +x xray-linux-amd64
+
+      - name: Prepare server config
+        env:
+          PRIVATE_KEY: ${{ needs.build.outputs.private_key }}
+        run: |
+          mkdir -p /opt/xray-test
+          cp xray-linux-amd64 /opt/xray-test/xray
+
+          cat > /opt/xray-test/config.json <<EOF
+          {
+            "log": {"loglevel": "info"},
+            "inbounds": [{
+              "listen": "0.0.0.0", "port": 443, "protocol": "vless",
+              "settings": {
+                "clients": [{"id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "flow": ""}],
+                "decryption": "none"
+              },
+              "streamSettings": {
+                "network": "tcp", "security": "reality",
+                "realitySettings": {
+                  "dest": "www.google.com:443",
+                  "serverNames": ["www.google.com"],
+                  "privateKey": "$PRIVATE_KEY",
+                  "shortIds": ["abcd1234"]
+                }
+              }
+            }],
+            "outbounds": [{"protocol": "freedom", "tag": "direct"}]
+          }
+          EOF
+
+      - name: Start Xray server
+        run: |
+          pkill -f 'xray-test/xray' 2>/dev/null || true
+          nohup /opt/xray-test/xray run -c /opt/xray-test/config.json \
+            > /opt/xray-test/server.log 2>&1 &
+          sleep 3
+          echo "Server PID: $(pgrep -f 'xray-test/xray')"
+
+      - name: Report server IP
+        id: server-ip
+        run: |
+          IP=$(hostname -I | awk '{print $1}')
+          echo "ip=$IP" >> $GITHUB_OUTPUT
+          echo "Server listening on $IP:443"
+
+    outputs:
+      server_ip: ${{ steps.server-ip.outputs.ip }}
+
+  # ── Job 4: Run tests from client runner ─────────────────────────
+  test-remote:
+    needs: [build, deploy-server]
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ${{ github.event.inputs.client_runner || 'xray-client' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: xray-binary
+
+      - name: Prepare binary
+        run: chmod +x xray-linux-amd64
+
+      - name: Run E2E tests against remote server
+        env:
+          XRAY_BIN: ./xray-linux-amd64
+          SERVER_IP: ${{ needs.deploy-server.outputs.server_ip }}
+          PUBLIC_KEY: ${{ needs.build.outputs.public_key }}
+        run: |
+          # Patch client config with actual values
+          sed -i "s|REPLACE_WITH_SERVER_IP|$SERVER_IP|g" testing/configs/client.json
+          sed -i "s|REPLACE_WITH_GENERATED_PUBLIC_KEY|$PUBLIC_KEY|g" testing/configs/client.json
+
+          ./testing/e2e/run_tests.sh \
+            --server "$SERVER_IP" \
+            --capture /tmp/xray-e2e-capture.pcap
+
+      - name: Upload traffic capture
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: traffic-capture
+          path: /tmp/xray-e2e-capture.pcap
+          if-no-files-found: ignore
+
+  # ── Job 5: Traffic analysis (post-test) ─────────────────────────
+  analyze-traffic:
+    needs: test-remote
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: traffic-capture
+        continue-on-error: true
+
+      - name: Install tshark
+        run: sudo apt-get update && sudo apt-get install -y tshark
+
+      - name: Analyze packet sizes
+        if: hashFiles('xray-e2e-capture.pcap') != ''
+        run: |
+          echo "=== Packet Size Distribution ==="
+          tshark -r xray-e2e-capture.pcap -Y "tcp.len > 0" \
+            -T fields -e tcp.len | sort -n | uniq -c | sort -rn | head -20
+
+          echo ""
+          echo "=== Inter-Arrival Times (ms) ==="
+          tshark -r xray-e2e-capture.pcap -Y "tcp.len > 0" \
+            -T fields -e frame.time_delta_displayed | head -50
+
+          echo ""
+          echo "=== TLS Client Hello Analysis ==="
+          tshark -r xray-e2e-capture.pcap -Y "tls.handshake.type == 1" \
+            -T fields -e tls.handshake.ja3_full 2>/dev/null || echo "No JA3 data"
+
+          echo ""
+          echo "=== Summary Statistics ==="
+          TOTAL=$(tshark -r xray-e2e-capture.pcap -Y "tcp.len > 0" \
+            -T fields -e tcp.len | wc -l)
+          UNIQUE=$(tshark -r xray-e2e-capture.pcap -Y "tcp.len > 0" \
+            -T fields -e tcp.len | sort -u | wc -l)
+          echo "Total data packets: $TOTAL"
+          echo "Unique payload sizes: $UNIQUE"
+          echo "Size diversity ratio: $(echo "scale=2; $UNIQUE * 100 / $TOTAL" | bc)%"

@@ -1,0 +1,86 @@
+{
+  "log": {
+    "loglevel": "info"
+  },
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": 1080,
+      "protocol": "socks",
+      "settings": {
+        "udp": true
+      },
+      "tag": "socks-in"
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "vless",
+      "tag": "vless-reality",
+      "settings": {
+        "vnext": [
+          {
+            "address": "REPLACE_WITH_SERVER_IP",
+            "port": 443,
+            "users": [
+              {
+                "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "fingerprint": "chrome",
+          "serverName": "www.google.com",
+          "publicKey": "REPLACE_WITH_GENERATED_PUBLIC_KEY",
+          "shortId": "abcd1234"
+        }
+      }
+    },
+    {
+      "protocol": "vmess",
+      "tag": "vmess-ws",
+      "settings": {
+        "vnext": [
+          {
+            "address": "REPLACE_WITH_SERVER_IP",
+            "port": 8443,
+            "users": [
+              {
+                "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": {
+          "path": "/test-anti-dpi"
+        },
+        "security": "none"
+      }
+    },
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "type": "field",
+        "outboundTag": "vless-reality",
+        "port": "0-65535"
+      }
+    ]
+  }
+}

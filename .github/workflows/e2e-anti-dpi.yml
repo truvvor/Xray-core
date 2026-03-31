@@ -69,7 +69,6 @@ jobs:
   # ── Job 3: Deploy server to self-hosted runner ──────────────────
   deploy-server:
     needs: build
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ github.event.inputs.server_runner || 'xray-server' }}
     steps:
       - uses: actions/download-artifact@v4
@@ -130,7 +129,6 @@ jobs:
   # ── Job 4: Run tests from client runner ─────────────────────────
   test-remote:
     needs: [build, deploy-server]
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ github.event.inputs.client_runner || 'xray-client' }}
     steps:
       - uses: actions/checkout@v6
@@ -167,7 +165,6 @@ jobs:
   # ── Job 5: Traffic analysis (post-test) ─────────────────────────
   analyze-traffic:
     needs: test-remote
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

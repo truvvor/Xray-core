@@ -39,8 +39,9 @@ jobs:
         id: keys
         run: |
           KEYPAIR=$(./xray-linux-amd64 x25519)
-          echo "private_key=$(echo "$KEYPAIR" | grep Private | awk '{print $3}')" >> $GITHUB_OUTPUT
-          echo "public_key=$(echo "$KEYPAIR" | grep Public | awk '{print $3}')" >> $GITHUB_OUTPUT
+          echo "Raw output: $KEYPAIR"
+          echo "private_key=$(echo "$KEYPAIR" | grep Private | awk '{print $NF}')" >> $GITHUB_OUTPUT
+          echo "public_key=$(echo "$KEYPAIR" | grep Public | awk '{print $NF}')" >> $GITHUB_OUTPUT
 
       - uses: actions/upload-artifact@v4
         with:

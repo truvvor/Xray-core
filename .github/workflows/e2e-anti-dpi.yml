@@ -19,6 +19,18 @@ on:
         description: 'Public IP of the server (leave empty for auto-detect)'
         required: false
         default: ''
+      private_key:
+        description: 'REALITY private key (leave empty to auto-generate)'
+        required: false
+        default: ''
+      public_key:
+        description: 'REALITY public key (leave empty to auto-generate)'
+        required: false
+        default: ''
+      server_duration:
+        description: 'How long to keep server alive (minutes)'
+        required: false
+        default: '15'
 
 jobs:
   # ── Job 1: Build the binary ─────────────────────────────────────
@@ -38,10 +50,19 @@ jobs:
       - name: Generate REALITY keys
         id: keys
         run: |
-          KEYPAIR=$(./xray-linux-amd64 x25519)
-          echo "Raw output: $KEYPAIR"
-          echo "private_key=$(echo "$KEYPAIR" | grep Private | awk '{print $NF}')" >> $GITHUB_OUTPUT
-          echo "public_key=$(echo "$KEYPAIR" | grep Public | awk '{print $NF}')" >> $GITHUB_OUTPUT
+          INPUT_PRIV="${{ github.event.inputs.private_key }}"
+          INPUT_PUB="${{ github.event.inputs.public_key }}"
+          if [ -n "$INPUT_PRIV" ] && [ -n "$INPUT_PUB" ]; then
+            echo "Using provided REALITY keys"
+            echo "private_key=$INPUT_PRIV" >> $GITHUB_OUTPUT
+            echo "public_key=$INPUT_PUB" >> $GITHUB_OUTPUT
+          else
+            KEYPAIR=$(./xray-linux-amd64 x25519)
+            echo "Raw output: $KEYPAIR"
+            echo "private_key=$(echo "$KEYPAIR" | grep Private | awk '{print $NF}')" >> $GITHUB_OUTPUT
+            echo "public_key=$(echo "$KEYPAIR" | grep Public | awk '{print $NF}')" >> $GITHUB_OUTPUT
+          fi
+          echo "Public key for client: $(grep public_key $GITHUB_OUTPUT 2>/dev/null || echo 'see outputs')"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -150,8 +171,10 @@ jobs:
       - name: Keep server alive for tests
         run: |
           echo "Keeping server alive while tests run..."
-          echo "Will stay up for up to 15 minutes."
-          for i in $(seq 1 90); do
+          echo "Will stay up for up to ${{ github.event.inputs.server_duration || '15' }} minutes."
+          DURATION="${{ github.event.inputs.server_duration || '15' }}"
+          LOOPS=$((DURATION * 6))
+          for i in $(seq 1 $LOOPS); do
             if ! pgrep -f 'xray-test/xray' > /dev/null; then
               echo "Xray process died at iteration $i, restarting..."
               nohup $HOME/xray-test/xray run -c $HOME/xray-test/config.json \

@@ -1,0 +1,119 @@
+name: Build and Release Xray-core (Anti-DPI)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v25.4.30-antidpi.1)'
+        required: true
+        type: string
+      prerelease:
+        description: 'Is this a pre-release?'
+        required: false
+        default: false
+        type: boolean
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: arm64
+            asset_name: Xray-linux-arm64-v8a
+          - goos: linux
+            goarch: mipsle
+            gomips: softfloat
+            asset_name: Xray-linux-mips32le
+          - goos: linux
+            goarch: mips
+            gomips: softfloat
+            asset_name: Xray-linux-mips32
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Determine version tag
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "TAG=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build Xray
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOMIPS: ${{ matrix.gomips }}
+          CGO_ENABLED: 0
+        run: |
+          VERSION="${{ steps.version.outputs.TAG }}"
+          BUILDDATE=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+          go build -o xray -trimpath -ldflags "\
+            -s -w \
+            -X github.com/xtls/xray-core/core.build=${BUILDDATE} \
+            -X github.com/xtls/xray-core/core.version=${VERSION}" \
+            ./main
+
+      - name: Package binary
+        run: |
+          mkdir -p release
+          zip -j "release/${{ matrix.asset_name }}.zip" xray
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: release/${{ matrix.asset_name }}.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Determine version tag
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "TAG=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+            echo "PRERELEASE=${{ github.event.inputs.prerelease }}" >> $GITHUB_OUTPUT
+          else
+            echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            echo "PRERELEASE=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.TAG }}
+          name: "Xray-core ${{ steps.version.outputs.TAG }} (Anti-DPI)"
+          prerelease: ${{ steps.version.outputs.PRERELEASE == 'true' }}
+          generate_release_notes: true
+          files: |
+            release/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,103 @@
+name: Deploy Test Server
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: 'How long to keep the server running (minutes)'
+        required: true
+        default: '30'
+
+jobs:
+  deploy:
+    runs-on: xray-server
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Build xray
+        run: CGO_ENABLED=0 go build -o xray-server-bin ./main
+
+      - name: Deploy Xray server
+        run: |
+          pkill -f 'xray-server-bin' 2>/dev/null || true
+          sleep 1
+
+          PRIVATE_KEY="GOMf_fC9RTI7Bg9YUpxPtNHEek3pa9PZLnq7xmN0X1s"
+
+          cat > /tmp/xray-deploy-server.json <<SEOF
+          {
+            "log": {"loglevel": "info"},
+            "inbounds": [{
+              "listen": "0.0.0.0", "port": 10443, "protocol": "vless",
+              "settings": {
+                "clients": [{"id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "flow": ""}],
+                "decryption": "none"
+              },
+              "streamSettings": {
+                "network": "tcp", "security": "reality",
+                "realitySettings": {
+                  "dest": "www.google.com:443",
+                  "serverNames": ["www.google.com"],
+                  "privateKey": "$PRIVATE_KEY",
+                  "shortIds": ["abcd1234"]
+                }
+              }
+            }],
+            "outbounds": [{"protocol": "freedom", "tag": "direct"}]
+          }
+          SEOF
+
+          nohup ./xray-server-bin run -c /tmp/xray-deploy-server.json > /tmp/xray-deploy.log 2>&1 &
+          XRAY_PID=$!
+          sleep 3
+
+          if ! kill -0 $XRAY_PID 2>/dev/null; then
+            echo "ERROR: Server failed to start"
+            cat /tmp/xray-deploy.log
+            exit 1
+          fi
+
+          IP=$(curl -s --max-time 5 https://ifconfig.me 2>/dev/null || curl -s --max-time 5 https://api.ipify.org 2>/dev/null)
+          echo "============================================"
+          echo "Server running on $IP:10443"
+          echo "Protocol: VLESS + REALITY"
+          echo "UUID: a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+          echo "Public Key: PxiMzZMXrYDmutuMmOBxzS0IGCn8UL0ywmbt1TA241c"
+          echo "Short ID: abcd1234"
+          echo "SNI: www.google.com"
+          echo "PID: $XRAY_PID"
+          echo "============================================"
+          cat /tmp/xray-deploy.log
+
+      - name: Keep server alive
+        run: |
+          DURATION=${{ github.event.inputs.duration_minutes }}
+          SECONDS_TOTAL=$((DURATION * 60))
+          echo "Keeping server alive for $DURATION minutes ($SECONDS_TOTAL seconds)..."
+          ELAPSED=0
+          while [ $ELAPSED -lt $SECONDS_TOTAL ]; do
+            if ! pgrep -f 'xray-server-bin' > /dev/null; then
+              echo "Xray died at ${ELAPSED}s, restarting..."
+              nohup ./xray-server-bin run -c /tmp/xray-deploy-server.json > /tmp/xray-deploy.log 2>&1 &
+              sleep 2
+            fi
+            sleep 10
+            ELAPSED=$((ELAPSED + 10))
+            if [ $((ELAPSED % 60)) -eq 0 ]; then
+              echo "Alive: ${ELAPSED}s / ${SECONDS_TOTAL}s"
+            fi
+          done
+          echo "Keepalive finished."
+
+      - name: Cleanup
+        if: always()
+        run: |
+          pkill -f 'xray-server-bin' 2>/dev/null || true
+          rm -f /tmp/xray-deploy-server.json /tmp/xray-deploy.log
+          echo "Cleaned up"

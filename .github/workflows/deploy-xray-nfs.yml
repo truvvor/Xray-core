@@ -1,0 +1,128 @@
+name: Deploy xray-nfs to production
+
+on:
+  workflow_dispatch:
+    inputs:
+      server_host:
+        description: 'Server IP'
+        required: true
+        default: '67.217.246.160'
+      server_port:
+        description: 'SSH port'
+        required: true
+        default: '2222'
+      branch:
+        description: 'Branch to build from'
+        required: true
+        default: 'claude/optimize-encryption-dpi-w8aSj'
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build xray-nfs
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          COMMIT=$(git describe --always --dirty)
+          echo "Building xray-nfs from commit: $COMMIT"
+          go build -o xray-nfs -trimpath -ldflags "-s -w \
+            -X github.com/xtls/xray-core/core.build=${COMMIT}" \
+            ./main
+          ls -la xray-nfs
+          ./xray-nfs version || true
+
+      - name: Deploy to server
+        env:
+          SSH_HOST: ${{ github.event.inputs.server_host }}
+          SSH_PORT: ${{ github.event.inputs.server_port }}
+          SSH_USER: root
+          SSH_PASS: ${{ secrets.DEPLOY_SSH_PASSWORD }}
+        run: |
+          # Install sshpass
+          sudo apt-get update -qq && sudo apt-get install -y -qq sshpass
+
+          # Upload binary
+          echo "Uploading xray-nfs to $SSH_HOST:$SSH_PORT..."
+          sshpass -p "$SSH_PASS" scp -P "$SSH_PORT" \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            ./xray-nfs "${SSH_USER}@${SSH_HOST}:/tmp/xray-nfs-new"
+
+          # Deploy on server
+          echo "Deploying on server..."
+          sshpass -p "$SSH_PASS" ssh -p "$SSH_PORT" \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            "${SSH_USER}@${SSH_HOST}" bash -s <<'DEPLOY_SCRIPT'
+          set -e
+
+          echo "=== Pre-deploy check ==="
+          /tmp/xray-nfs-new version || true
+
+          echo "=== Stopping xray-nfs ==="
+          systemctl stop xray-nfs || true
+          sleep 1
+
+          echo "=== Backing up current binary ==="
+          if [ -f /usr/local/bin/xray-nfs ]; then
+            cp /usr/local/bin/xray-nfs /usr/local/bin/xray-nfs.bak
+            echo "Backup created: xray-nfs.bak"
+          fi
+
+          echo "=== Installing new binary ==="
+          mv /tmp/xray-nfs-new /usr/local/bin/xray-nfs
+          chmod +x /usr/local/bin/xray-nfs
+
+          echo "=== Starting xray-nfs ==="
+          systemctl start xray-nfs
+          sleep 2
+
+          echo "=== Post-deploy check ==="
+          systemctl status xray-nfs --no-pager
+          /usr/local/bin/xray-nfs version
+          echo ""
+          echo "=== Last 10 log lines ==="
+          journalctl -u xray-nfs -n 10 --no-pager
+          echo ""
+          echo "=== DEPLOY COMPLETE ==="
+          DEPLOY_SCRIPT
+
+      - name: Rollback on failure
+        if: failure()
+        env:
+          SSH_HOST: ${{ github.event.inputs.server_host }}
+          SSH_PORT: ${{ github.event.inputs.server_port }}
+          SSH_USER: root
+          SSH_PASS: ${{ secrets.DEPLOY_SSH_PASSWORD }}
+        run: |
+          echo "Deploy failed! Attempting rollback..."
+          sshpass -p "$SSH_PASS" ssh -p "$SSH_PORT" \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            "${SSH_USER}@${SSH_HOST}" bash -s <<'ROLLBACK_SCRIPT'
+          if [ -f /usr/local/bin/xray-nfs.bak ]; then
+            echo "Restoring backup..."
+            systemctl stop xray-nfs || true
+            mv /usr/local/bin/xray-nfs.bak /usr/local/bin/xray-nfs
+            systemctl start xray-nfs
+            echo "Rollback complete."
+            systemctl status xray-nfs --no-pager
+          else
+            echo "No backup found! Manual intervention required."
+          fi
+          ROLLBACK_SCRIPT

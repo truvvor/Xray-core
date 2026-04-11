@@ -249,6 +249,12 @@ func NewSinusoidalConn(conn net.Conn, cfg *SinusoidalConfig) *SinusoidalConn {
 	}
 }
 
+// SetSeedFromShortId sets the PRNG seed for synchronized parameter rotation.
+// Both client and server use the same shortId, so rotations stay in sync.
+func (c *SinusoidalConn) SetSeedFromShortId(shortId string) {
+	c.delay.SetSeed([]byte("sinusoidal-seed:" + shortId))
+}
+
 // CloseWrite implements the CloseWriteConn interface required by REALITY.
 func (c *SinusoidalConn) CloseWrite() error {
 	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {

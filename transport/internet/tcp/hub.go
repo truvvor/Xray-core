@@ -133,7 +133,15 @@ func (v *Listener) keepAccepting() {
 					return
 				}
 				// Anti-DPI: sinusoidal modulation of traffic patterns after REALITY
-				conn = fragment.NewSinusoidalConn(conn, nil)
+				sinCfg := fragment.GetGlobalSinusoidal()
+				if sinCfg != nil {
+					sc := fragment.NewSinusoidalConn(conn, sinCfg)
+					// Use first shortId as seed for parameter rotation
+					if len(v.obfsShortIds) > 0 {
+						sc.SetSeedFromShortId(v.obfsShortIds[0])
+					}
+					conn = sc
+				}
 			}
 			if v.authConfig != nil {
 				conn = v.authConfig.Server(conn)

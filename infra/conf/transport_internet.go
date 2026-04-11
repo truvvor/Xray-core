@@ -802,6 +802,9 @@ type REALITYConfig struct {
 	ShortId       string `json:"shortId"`
 	Mldsa65Verify string `json:"mldsa65Verify"`
 	SpiderX       string `json:"spiderX"`
+
+	// Anti-DPI sinusoidal traffic modulation
+	Sinusoidal *fragment.SinusoidalConfig `json:"sinusoidal"`
 }
 
 func (c *REALITYConfig) Build() (proto.Message, error) {
@@ -989,6 +992,19 @@ func (c *REALITYConfig) Build() (proto.Message, error) {
 		config.SpiderX = u.String()
 		config.ServerName = c.ServerName
 	}
+
+	// Register sinusoidal config for anti-DPI modulation
+	if c.Sinusoidal != nil {
+		// Server side: register globally (applies to all shortIds)
+		if len(c.ShortIds) > 0 {
+			fragment.SetGlobalSinusoidal(c.Sinusoidal)
+		}
+		// Client side: register for specific shortId
+		if c.ShortId != "" {
+			fragment.RegisterSinusoidal(c.ShortId, c.Sinusoidal)
+		}
+	}
+
 	return config, nil
 }
 

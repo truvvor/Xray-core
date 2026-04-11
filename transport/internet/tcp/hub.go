@@ -124,10 +124,12 @@ func (v *Listener) keepAccepting() {
 			if v.tlsConfig != nil {
 				conn = tls.Server(conn, v.tlsConfig)
 			} else if v.realityConfig != nil {
-				// Anti-DPI: strip obfuscation padding before REALITY handshake
-				if len(v.obfsShortIds) > 0 {
-					conn = fragment.NewObfuscationServerConnMulti(conn, v.obfsShortIds)
-				}
+				// NOTE: ObfuscationServerConnMulti is DISABLED.
+				// Pre-REALITY obfuscation was removed from the client (V2 header's
+				// 0x00 first byte was detectable by ТСПУ as non-TLS). The client now
+				// sends clean TLS ClientHello directly. No server-side stripping needed.
+				// The ObfuscationServerConn wrapper was buffering bytes and breaking
+				// REALITY's handshake read sequence.
 				if conn, err = reality.Server(conn, v.realityConfig); err != nil {
 					errors.LogInfo(context.Background(), err.Error())
 					return

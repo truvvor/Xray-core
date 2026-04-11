@@ -2,6 +2,8 @@ package fragment
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"math"
 	"net"
 	"sync"

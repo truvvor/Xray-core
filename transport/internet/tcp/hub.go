@@ -132,16 +132,9 @@ func (v *Listener) keepAccepting() {
 					errors.LogInfo(context.Background(), err.Error())
 					return
 				}
-				// Anti-DPI: sinusoidal modulation of traffic patterns after REALITY
-				sinCfg := fragment.GetGlobalSinusoidal()
-				if sinCfg != nil {
-					sc := fragment.NewSinusoidalConn(conn, sinCfg)
-					// Use first shortId as seed for parameter rotation
-					if len(v.obfsShortIds) > 0 {
-						sc.SetSeedFromShortId(v.obfsShortIds[0])
-					}
-					conn = sc
-				}
+				// NOTE: sinusoidal modulation is CLIENT-ONLY.
+				// Server responses are already encrypted TLS — DPI can't analyze them.
+				// Adding delays on server side breaks TLS handshake timing.
 			}
 			if v.authConfig != nil {
 				conn = v.authConfig.Server(conn)

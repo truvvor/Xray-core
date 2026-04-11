@@ -263,7 +263,9 @@ func (c *SinusoidalConn) CloseWrite() error {
 	return c.Conn.Close()
 }
 
-// Write applies sinusoidal modulation to first N writes, then pass-through.
+// Write applies sinusoidal timing jitter to first N writes, then pass-through.
+// Does NOT split data into chunks — only adds a small delay before each write
+// to create natural-looking inter-packet timing during handshake.
 func (c *SinusoidalConn) Write(b []byte) (int, error) {
 	c.mu.Lock()
 	c.writeCount++
@@ -275,40 +277,10 @@ func (c *SinusoidalConn) Write(b []byte) (int, error) {
 		return c.Conn.Write(b)
 	}
 
-	// For handshake/early writes: split into variable chunks with micro-delays
-	// Don't split small writes
-	if len(b) < c.minChunk*2 {
-		d := c.delay.NextDelay()
-		if d > 0 {
-			time.Sleep(d)
-		}
-		return c.Conn.Write(b)
+	// Add sinusoidal micro-delay before write (no chunking — data sent whole)
+	d := c.delay.NextDelay()
+	if d > 0 {
+		time.Sleep(d)
 	}
-
-	total := 0
-	for len(b) > 0 {
-		chunkSize := c.delay.NextChunkSize(c.minChunk, c.maxChunk)
-		if chunkSize >= len(b) {
-			d := c.delay.NextDelay()
-			if d > 0 {
-				time.Sleep(d)
-			}
-			n, err := c.Conn.Write(b)
-			total += n
-			return total, err
-		}
-
-		d := c.delay.NextDelay()
-		if d > 0 {
-			time.Sleep(d)
-		}
-
-		n, err := c.Conn.Write(b[:chunkSize])
-		total += n
-		if err != nil {
-			return total, err
-		}
-		b = b[chunkSize:]
-	}
-	return total, nil
+	return c.Conn.Write(b)
 }

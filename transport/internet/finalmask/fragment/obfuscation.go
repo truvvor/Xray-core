@@ -42,6 +42,14 @@ func NewObfuscationClientConn(conn net.Conn, shortId string) *ObfuscationClientC
 	}
 }
 
+// CloseWrite implements the CloseWriteConn interface required by REALITY.
+func (c *ObfuscationClientConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return c.Conn.Close()
+}
+
 // Write prepends random padding before the first write, then passes through.
 func (c *ObfuscationClientConn) Write(b []byte) (int, error) {
 	c.mu.Lock()
@@ -103,6 +111,14 @@ func NewObfuscationServerConnMulti(conn net.Conn, shortIds []string) *Obfuscatio
 		Conn:   conn,
 		magics: magics,
 	}
+}
+
+// CloseWrite implements the CloseWriteConn interface required by REALITY.
+func (c *ObfuscationServerConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return c.Conn.Close()
 }
 
 // Read strips padding from the first read, then passes through.

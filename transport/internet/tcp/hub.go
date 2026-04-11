@@ -3,7 +3,6 @@ package tcp
 import (
 	"context"
 	gotls "crypto/tls"
-	"encoding/hex"
 	"strings"
 	"time"
 
@@ -12,7 +11,6 @@ import (
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/transport/internet"
-	"github.com/xtls/xray-core/transport/internet/finalmask/fragment"
 	"github.com/xtls/xray-core/transport/internet/reality"
 	"github.com/xtls/xray-core/transport/internet/stat"
 	"github.com/xtls/xray-core/transport/internet/tls"
@@ -26,7 +24,6 @@ type Listener struct {
 	authConfig      internet.ConnectionAuthenticator
 	config          *Config
 	addConn         internet.ConnHandler
-	obfsShortIds    []string // shortIds for anti-DPI obfuscation (hex-encoded)
 }
 
 // ListenTCP creates a new Listener based on configurations.
@@ -83,10 +80,6 @@ func ListenTCP(ctx context.Context, address net.Address, port net.Port, streamSe
 	if config := reality.ConfigFromStreamSettings(streamSettings); config != nil {
 		l.realityConfig = config.GetREALITYConfig()
 		go goreality.DetectPostHandshakeRecordsLens(l.realityConfig)
-		// Collect shortIds for anti-DPI obfuscation
-		for _, sid := range config.ShortIds {
-			l.obfsShortIds = append(l.obfsShortIds, hex.EncodeToString(sid))
-		}
 	}
 
 	if tcpSettings.HeaderSettings != nil {

@@ -2,6 +2,7 @@ package fragment
 
 import (
 	"math"
+	"net"
 	"sync"
 	"time"
 

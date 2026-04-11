@@ -99,17 +99,40 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		}
 	} else if config := reality.ConfigFromStreamSettings(streamSettings); config != nil {
 		shortId := hex.EncodeToString(config.ShortId)
+
+		// Anti-DPI: obfuscation padding before REALITY handshake
 		if shortId != "" {
-			conn = fragment.NewObfuscationClientConn(conn, shortId)
+			if mimCfg := fragment.GetMimicry(shortId); mimCfg != nil {
+				// Use mimicry-enhanced obfuscation (protocol-realistic padding)
+				profile := fragment.GetMimicryProfile(mimCfg.Profile)
+				if profile == nil {
+					profile = fragment.ProfileWebRTCZoom // default
+				}
+				conn = fragment.NewMimicryObfuscationClientConn(conn, shortId, profile, mimCfg)
+			} else {
+				// Fallback to basic obfuscation
+				conn = fragment.NewObfuscationClientConn(conn, shortId)
+			}
 		}
+
 		if conn, err = reality.UClient(conn, config, ctx, dest); err != nil {
 			return nil, err
 		}
-		// Anti-DPI: sinusoidal modulation if configured
-		if sinCfg := fragment.GetSinusoidal(hex.EncodeToString(config.ShortId)); sinCfg != nil {
-			sc := fragment.NewSinusoidalConn(conn, sinCfg)
-			sc.SetSeedFromShortId(shortId)
-			conn = sc
+
+		// Anti-DPI: post-handshake traffic mimicry (timing patterns)
+		if shortId != "" {
+			if mimCfg := fragment.GetMimicry(shortId); mimCfg != nil {
+				profile := fragment.GetMimicryProfile(mimCfg.Profile)
+				if profile == nil {
+					profile = fragment.ProfileWebRTCZoom
+				}
+				conn = fragment.NewMimicryConn(conn, profile, mimCfg, shortId)
+			} else if sinCfg := fragment.GetSinusoidal(shortId); sinCfg != nil {
+				// Legacy: sinusoidal modulation fallback
+				sc := fragment.NewSinusoidalConn(conn, sinCfg)
+				sc.SetSeedFromShortId(shortId)
+				conn = sc
+			}
 		}
 	}
 

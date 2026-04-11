@@ -429,29 +429,31 @@ func (e *MimicryEngine) sampleGamma(shape, scale float64) float64 {
 
 // ==================== Mimicry Connection Wrapper ====================
 
-// MimicryConn wraps a TCP connection and applies traffic mimicry patterns.
-// Replaces both ObfuscationClientConn (padding) and SinusoidalConn (timing).
+// MimicryConn wraps a TCP connection and applies traffic mimicry patterns
+// to ALL writes for the lifetime of the connection. This is critical because
+// ТСПУ analyzes ongoing traffic — stopping mimicry after N writes lets DPI
+// detect the transition and kill the connection.
 type MimicryConn struct {
 	net.Conn
-	engine    *MimicryEngine
-	mu        sync.Mutex
-	writeNum  int
-	maxWrites int // after this, pass-through
-	shortId   string
+	engine   *MimicryEngine
+	mu       sync.Mutex
+	writeNum int
+	shortId  string
 }
 
-// NewMimicryConn creates a connection wrapper that applies mimicry timing.
-// Skips the first 3 writes (NFS/ML-KEM handshake — timing-sensitive),
-// then applies mimicry to writes 4-18, then pure pass-through.
+// NewMimicryConn creates a connection wrapper that applies mimicry timing
+// to ALL writes. Writes 1-3 (NFS/ML-KEM handshake) pass through without delay.
+// Writes 4+ get mimicry-profiled timing. After write 32, delays are reduced
+// to micro-delays (1-3ms) to maintain throughput while still looking like
+// real protocol traffic to DPI.
 func NewMimicryConn(conn net.Conn, profile *MimicryProfile, cfg *MimicryConfig, shortId string) *MimicryConn {
 	engine := NewMimicryEngine(profile, cfg)
 	engine.SetSeed(shortId)
 
 	return &MimicryConn{
-		Conn:      conn,
-		engine:    engine,
-		maxWrites: 18, // stop mimicry after write 18
-		shortId:   shortId,
+		Conn:    conn,
+		engine:  engine,
+		shortId: shortId,
 	}
 }
 
@@ -463,40 +465,56 @@ func (c *MimicryConn) CloseWrite() error {
 	return c.Conn.Close()
 }
 
-// Write applies mimicry timing to writes 4-18, then pass-through.
-// Writes 1-3 are the NFS/ML-KEM handshake — pass through without delay
-// to avoid breaking the timing-sensitive crypto handshake.
+// Write applies mimicry timing to ALL writes for the connection lifetime.
+//
+// Phase 1 (writes 1-3): NFS/ML-KEM handshake — no delay (timing-sensitive).
+// Phase 2 (writes 4-32): Full mimicry delays from profile (1-50ms) — this is
+//   the critical window where DPI makes its classification decision.
+// Phase 3 (writes 33+): Micro-delays (1-3ms) — enough to prevent raw TCP
+//   pacing detection while maintaining good throughput. DPI rotation checks
+//   happen every 32 writes.
+//
+// ТСПУ kills connections where mimicry stops abruptly (timing signature change).
+// Continuous micro-delays make the entire session look like one protocol flow.
 func (c *MimicryConn) Write(b []byte) (int, error) {
 	c.mu.Lock()
 	c.writeNum++
 	num := c.writeNum
 	c.mu.Unlock()
 
-	// After mimicry window, pure pass-through
-	if num > c.maxWrites {
-		// Periodically check for DPI and rotate if needed
-		if num%64 == 0 {
-			c.engine.RecordWrite(len(b))
-			if c.engine.ShouldRotate() {
-				c.engine.RotateProfile()
-			}
-		}
-		return c.Conn.Write(b)
+	// Record for DPI detection (sample every write in phases 1-2, every 32nd after)
+	if num <= 32 || num%32 == 0 {
+		c.engine.RecordWrite(len(b))
 	}
 
-	// Record for DPI detection
-	c.engine.RecordWrite(len(b))
+	// Check DPI rotation periodically
+	if num%32 == 0 && c.engine.ShouldRotate() {
+		c.engine.RotateProfile()
+	}
 
-	// Writes 1-3: NFS handshake — no delay (timing-sensitive)
+	// Phase 1: NFS handshake — no delay
 	if num <= 3 {
 		return c.Conn.Write(b)
 	}
 
-	// Writes 4-18: apply mimicry timing delay
-	delay := c.engine.NextDelay()
-	if delay > 0 {
-		time.Sleep(delay)
+	// Phase 2: Full mimicry delays (critical classification window)
+	if num <= 32 {
+		delay := c.engine.NextDelay()
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		return c.Conn.Write(b)
 	}
+
+	// Phase 3: Micro-delays (1-3ms) — maintain protocol appearance
+	// Uses a lightweight delay derived from the engine's PRNG, not the full
+	// profile distribution, to minimize overhead while preventing raw TCP
+	// timing fingerprinting.
+	c.engine.mu.Lock()
+	r := c.engine.nextFloat()
+	c.engine.mu.Unlock()
+	microDelay := time.Duration((1.0 + r*2.0) * float64(time.Millisecond)) // 1-3ms
+	time.Sleep(microDelay)
 
 	return c.Conn.Write(b)
 }

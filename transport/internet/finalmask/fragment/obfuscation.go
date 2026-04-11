@@ -278,7 +278,22 @@ func (c *ObfuscationServerConn) Read(b []byte) (int, error) {
 		return c.Conn.Read(b)
 	}
 
-	// Auto-detect: V2 starts with 0x00, V1 starts with paddingLen^magic (32-128 range)
+	// Auto-detect protocol version:
+	// 1. Clean TLS: first byte 0x16 (ContentType: Handshake) — pass through immediately.
+	//    This is critical: without pre-REALITY obfuscation, the client sends a raw TLS
+	//    ClientHello. We must NOT accidentally interpret it as V1 obfuscation.
+	// 2. V2: first byte 0x00 — resonance tag + XOR-masked padding
+	// 3. V1 (legacy): first byte is paddingLen^magic
+	if buf[0] == 0x16 {
+		// Clean TLS ClientHello — no obfuscation, pass through
+		n := copy(b, buf[:totalRead])
+		if totalRead > n {
+			c.mu.Lock()
+			c.overflow = append(c.overflow, buf[n:totalRead]...)
+			c.mu.Unlock()
+		}
+		return n, nil
+	}
 	if buf[0] == obfsV2Marker && totalRead >= obfsV2HeaderLen {
 		return c.readV2(buf, totalRead, b)
 	}

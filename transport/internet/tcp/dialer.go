@@ -100,26 +100,21 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	} else if config := reality.ConfigFromStreamSettings(streamSettings); config != nil {
 		shortId := hex.EncodeToString(config.ShortId)
 
-		// Anti-DPI: obfuscation padding before REALITY handshake
-		if shortId != "" {
-			if mimCfg := fragment.GetMimicry(shortId); mimCfg != nil {
-				// Use mimicry-enhanced obfuscation (protocol-realistic padding)
-				profile := fragment.GetMimicryProfile(mimCfg.Profile)
-				if profile == nil {
-					profile = fragment.ProfileWebRTCZoom // default
-				}
-				conn = fragment.NewMimicryObfuscationClientConn(conn, shortId, profile, mimCfg)
-			} else {
-				// Fallback to basic obfuscation
-				conn = fragment.NewObfuscationClientConn(conn, shortId)
-			}
-		}
+		// NOTE: Pre-REALITY obfuscation (V2 padding) is DISABLED.
+		// It prepended non-TLS bytes (0x00 marker) before the ClientHello,
+		// which ТСПУ instantly detected as non-standard TLS. Without it,
+		// REALITY sends a clean TLS 1.3 ClientHello that is indistinguishable
+		// from a real browser connecting to the dest server (e.g., yandex.ru).
+		// The server's ObfuscationServerConnMulti auto-detects no-obfuscation
+		// and passes through cleanly (readV1 fallback).
 
 		if conn, err = reality.UClient(conn, config, ctx, dest); err != nil {
 			return nil, err
 		}
 
 		// Anti-DPI: post-handshake traffic mimicry (timing patterns)
+		// This is the ONLY anti-DPI layer now — applied INSIDE the TLS tunnel
+		// where ТСПУ can only see encrypted TLS records with realistic timing.
 		if shortId != "" {
 			if mimCfg := fragment.GetMimicry(shortId); mimCfg != nil {
 				profile := fragment.GetMimicryProfile(mimCfg.Profile)

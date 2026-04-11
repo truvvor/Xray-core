@@ -105,6 +105,8 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		if conn, err = reality.UClient(conn, config, ctx, dest); err != nil {
 			return nil, err
 		}
+		// Anti-DPI: sinusoidal modulation of traffic patterns after REALITY
+		conn = fragment.NewSinusoidalConn(conn, nil) // nil = default params
 	}
 
 	tcpSettings := streamSettings.ProtocolSettings.(*Config)

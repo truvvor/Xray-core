@@ -132,6 +132,8 @@ func (v *Listener) keepAccepting() {
 					errors.LogInfo(context.Background(), err.Error())
 					return
 				}
+				// Anti-DPI: sinusoidal modulation of traffic patterns after REALITY
+				conn = fragment.NewSinusoidalConn(conn, nil)
 			}
 			if v.authConfig != nil {
 				conn = v.authConfig.Server(conn)

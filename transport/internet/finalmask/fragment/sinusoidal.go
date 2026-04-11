@@ -182,3 +182,108 @@ func (sd *SinusoidalDelay) CurrentParams() (baseDelay, amplitude, period, phase 
 	defer sd.mu.RUnlock()
 	return sd.BaseDelay, sd.Amplitude, sd.Period, sd.Phase, sd.epoch
 }
+
+// NextChunkSize returns a sinusoidally-varying chunk size in bytes.
+// Uses a separate sine curve offset by π/3 from the delay curve to decorrelate them.
+func (sd *SinusoidalDelay) NextChunkSize(minSize, maxSize int) int {
+	sd.mu.RLock()
+	defer sd.mu.RUnlock()
+
+	t := time.Now().Sub(sd.startTime).Seconds()
+	// Phase offset by π/3 so chunk sizes don't correlate with delays
+	sineVal := math.Sin(2*math.Pi*t/sd.Period + sd.Phase + math.Pi/3)
+
+	// Map sine [-1,1] → [minSize, maxSize]
+	mid := float64(minSize+maxSize) / 2
+	halfRange := float64(maxSize-minSize) / 2
+	size := mid + halfRange*sineVal
+
+	// Add ±15% jitter
+	jitterPct := float64(crypto.RandBetween(-150, 150)) / 1000.0
+	size *= (1 + jitterPct)
+
+	result := int(size)
+	if result < minSize {
+		result = minSize
+	}
+	if result > maxSize {
+		result = maxSize
+	}
+	return result
+}
+
+// SinusoidalConn wraps a net.Conn and applies sinusoidal delay and chunk size
+// variation to all writes. This makes traffic patterns look like natural
+// browsing rather than VPN tunnel traffic.
+//
+// Applied AFTER REALITY handshake — modulates the encrypted VPN data flow.
+// Both client and server use independent instances (no sync needed here —
+// sync is only needed for parameter rotation with shared seed).
+type SinusoidalConn struct {
+	net.Conn
+	delay    *SinusoidalDelay
+	mu       sync.Mutex
+	minChunk int
+	maxChunk int
+}
+
+// NewSinusoidalConn wraps a connection with sinusoidal write modulation.
+func NewSinusoidalConn(conn net.Conn, cfg *SinusoidalConfig) *SinusoidalConn {
+	return &SinusoidalConn{
+		Conn:     conn,
+		delay:    NewSinusoidalDelay(cfg),
+		minChunk: 128,
+		maxChunk: 1200,
+	}
+}
+
+// CloseWrite implements the CloseWriteConn interface required by REALITY.
+func (c *SinusoidalConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return c.Conn.Close()
+}
+
+// Write splits data into sinusoidally-varying chunks with sinusoidal delays.
+func (c *SinusoidalConn) Write(b []byte) (int, error) {
+	// Small writes pass through (handshake messages etc.)
+	if len(b) < c.minChunk*2 {
+		d := c.delay.NextDelay()
+		if d > 0 {
+			time.Sleep(d)
+		}
+		return c.Conn.Write(b)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	total := 0
+	for len(b) > 0 {
+		chunkSize := c.delay.NextChunkSize(c.minChunk, c.maxChunk)
+		if chunkSize >= len(b) {
+			// Last chunk
+			d := c.delay.NextDelay()
+			if d > 0 {
+				time.Sleep(d)
+			}
+			n, err := c.Conn.Write(b)
+			total += n
+			return total, err
+		}
+
+		d := c.delay.NextDelay()
+		if d > 0 {
+			time.Sleep(d)
+		}
+
+		n, err := c.Conn.Write(b[:chunkSize])
+		total += n
+		if err != nil {
+			return total, err
+		}
+		b = b[chunkSize:]
+	}
+	return total, nil
+}

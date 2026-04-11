@@ -214,27 +214,38 @@ func (sd *SinusoidalDelay) NextChunkSize(minSize, maxSize int) int {
 }
 
 // SinusoidalConn wraps a net.Conn and applies sinusoidal delay and chunk size
-// variation to all writes. This makes traffic patterns look like natural
-// browsing rather than VPN tunnel traffic.
+// variation to the FIRST few writes only. After maxModulatedWrites, data
+// passes through without delay to maintain full speed.
 //
-// Applied AFTER REALITY handshake — modulates the encrypted VPN data flow.
-// Both client and server use independent instances (no sync needed here —
-// sync is only needed for parameter rotation with shared seed).
+// This defeats DPI fingerprinting of connection establishment patterns
+// without impacting bulk data transfer performance.
 type SinusoidalConn struct {
 	net.Conn
-	delay    *SinusoidalDelay
-	mu       sync.Mutex
-	minChunk int
-	maxChunk int
+	delay              *SinusoidalDelay
+	mu                 sync.Mutex
+	writeCount         int
+	maxModulatedWrites int // only modulate first N writes (handshake + early data)
+	minChunk           int
+	maxChunk           int
 }
 
 // NewSinusoidalConn wraps a connection with sinusoidal write modulation.
+// Only the first 10 writes are modulated; after that, pass-through.
 func NewSinusoidalConn(conn net.Conn, cfg *SinusoidalConfig) *SinusoidalConn {
+	if cfg == nil {
+		// Low-latency defaults for connection establishment
+		cfg = &SinusoidalConfig{
+			BaseDelay: 3,   // 3ms base
+			Amplitude: 2,   // ±2ms
+			Period:    1.0,  // 1s cycle
+		}
+	}
 	return &SinusoidalConn{
-		Conn:     conn,
-		delay:    NewSinusoidalDelay(cfg),
-		minChunk: 128,
-		maxChunk: 1200,
+		Conn:               conn,
+		delay:              NewSinusoidalDelay(cfg),
+		maxModulatedWrites: 10, // only first 10 writes
+		minChunk:           256,
+		maxChunk:           2048,
 	}
 }
 
@@ -246,9 +257,20 @@ func (c *SinusoidalConn) CloseWrite() error {
 	return c.Conn.Close()
 }
 
-// Write splits data into sinusoidally-varying chunks with sinusoidal delays.
+// Write applies sinusoidal modulation to first N writes, then pass-through.
 func (c *SinusoidalConn) Write(b []byte) (int, error) {
-	// Small writes pass through (handshake messages etc.)
+	c.mu.Lock()
+	c.writeCount++
+	count := c.writeCount
+	c.mu.Unlock()
+
+	// After initial writes, pure pass-through — no performance impact
+	if count > c.maxModulatedWrites {
+		return c.Conn.Write(b)
+	}
+
+	// For handshake/early writes: split into variable chunks with micro-delays
+	// Don't split small writes
 	if len(b) < c.minChunk*2 {
 		d := c.delay.NextDelay()
 		if d > 0 {
@@ -257,14 +279,10 @@ func (c *SinusoidalConn) Write(b []byte) (int, error) {
 		return c.Conn.Write(b)
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	total := 0
 	for len(b) > 0 {
 		chunkSize := c.delay.NextChunkSize(c.minChunk, c.maxChunk)
 		if chunkSize >= len(b) {
-			// Last chunk
 			d := c.delay.NextDelay()
 			if d > 0 {
 				time.Sleep(d)

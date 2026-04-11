@@ -116,11 +116,71 @@ var ProfileTLSNormal = &MimicryProfile{
 	HeaderTemplate: nil, // No special header — REALITY already provides TLS header
 }
 
+// ProfileEWS mimics Exchange Web Services (Outlook/ActiveSync) traffic.
+// Characteristics: SOAP/XML payloads are typically medium-large with periodic
+// sync polling. Bimodal: large SOAP responses ~2-4KB + small keepalive/ping ~100-200B.
+// Timing: periodic polling with jitter — gamma distributed ~500ms mean
+// with occasional burst syncs.
+var ProfileEWS = &MimicryProfile{
+	Name: "ews",
+	SizeDistribution: SizeDistribution{
+		Type:   "bimodal",
+		Params: []float64{1400, 200, 0.55, 150, 50}, // 55% full TLS records, 45% small
+	},
+	TimingDistribution: TimingDistribution{
+		Type:   "gamma",
+		Params: []float64{1.5, 12.0}, // shape=1.5, scale=12 → mean 18ms, bursty
+	},
+	HeaderTemplate: nil, // Inside TLS — no visible header
+}
+
+// ProfileSMTPSSL mimics SMTP over TLS (port 465) traffic.
+// Characteristics: command-response pattern — small commands (~50-200B) followed
+// by medium responses (~200-800B), with occasional large DATA transfers.
+// Timing: sequential command-response with human-speed gaps (50-300ms).
+var ProfileSMTPSSL = &MimicryProfile{
+	Name: "smtp_ssl",
+	SizeDistribution: SizeDistribution{
+		Type: "histogram",
+		Params: []float64{
+			120, 0.40,  // SMTP commands: EHLO, MAIL FROM, RCPT TO (40%)
+			400, 0.30,  // SMTP responses + small body chunks (30%)
+			1200, 0.20, // DATA transfer — large email body (20%)
+			60, 0.10,   // Keepalive/NOOP (10%)
+		},
+	},
+	TimingDistribution: TimingDistribution{
+		Type:   "lognormal",
+		Params: []float64{3.5, 1.0}, // median ~33ms, high variance for command gaps
+	},
+	HeaderTemplate: nil,
+}
+
+// ProfileSSH mimics SSH interactive session traffic.
+// Characteristics: highly bimodal — tiny keystroke packets (~48-96B with SSH overhead)
+// and medium command output bursts (~200-1400B). Timing: irregular human typing
+// patterns with long pauses (lognormal, median ~100ms, high variance).
+var ProfileSSH = &MimicryProfile{
+	Name: "ssh",
+	SizeDistribution: SizeDistribution{
+		Type:   "bimodal",
+		Params: []float64{64, 20, 0.6, 800, 400}, // 60% tiny keystrokes, 40% output bursts
+	},
+	TimingDistribution: TimingDistribution{
+		Type:   "lognormal",
+		Params: []float64{4.0, 1.2}, // median ~55ms, high variance (human typing)
+	},
+	HeaderTemplate: nil,
+}
+
 // knownProfiles maps profile names to their definitions.
 var knownProfiles = map[string]*MimicryProfile{
 	"webrtc_zoom": ProfileWebRTCZoom,
 	"quic_h3":     ProfileQUICH3,
 	"tls_normal":  ProfileTLSNormal,
+	"ews":         ProfileEWS,
+	"smtp_ssl":    ProfileSMTPSSL,
+	"ssh":         ProfileSSH,
 }
 
 // GetMimicryProfile returns a profile by name, or nil if unknown.

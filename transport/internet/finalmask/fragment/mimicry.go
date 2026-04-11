@@ -440,8 +440,9 @@ type MimicryConn struct {
 	shortId   string
 }
 
-// NewMimicryConn creates a connection wrapper that applies mimicry to the first
-// N writes. After that, data passes through without modification for full speed.
+// NewMimicryConn creates a connection wrapper that applies mimicry timing.
+// Skips the first 3 writes (NFS/ML-KEM handshake — timing-sensitive),
+// then applies mimicry to writes 4-18, then pure pass-through.
 func NewMimicryConn(conn net.Conn, profile *MimicryProfile, cfg *MimicryConfig, shortId string) *MimicryConn {
 	engine := NewMimicryEngine(profile, cfg)
 	engine.SetSeed(shortId)
@@ -449,7 +450,7 @@ func NewMimicryConn(conn net.Conn, profile *MimicryProfile, cfg *MimicryConfig, 
 	return &MimicryConn{
 		Conn:      conn,
 		engine:    engine,
-		maxWrites: 15, // mimicry on first 15 writes (handshake + early data)
+		maxWrites: 18, // stop mimicry after write 18
 		shortId:   shortId,
 	}
 }
@@ -462,14 +463,16 @@ func (c *MimicryConn) CloseWrite() error {
 	return c.Conn.Close()
 }
 
-// Write applies mimicry timing to first N writes, then pass-through.
+// Write applies mimicry timing to writes 4-18, then pass-through.
+// Writes 1-3 are the NFS/ML-KEM handshake — pass through without delay
+// to avoid breaking the timing-sensitive crypto handshake.
 func (c *MimicryConn) Write(b []byte) (int, error) {
 	c.mu.Lock()
 	c.writeNum++
 	num := c.writeNum
 	c.mu.Unlock()
 
-	// After initial writes, pure pass-through
+	// After mimicry window, pure pass-through
 	if num > c.maxWrites {
 		// Periodically check for DPI and rotate if needed
 		if num%64 == 0 {
@@ -484,7 +487,12 @@ func (c *MimicryConn) Write(b []byte) (int, error) {
 	// Record for DPI detection
 	c.engine.RecordWrite(len(b))
 
-	// Apply mimicry timing delay
+	// Writes 1-3: NFS handshake — no delay (timing-sensitive)
+	if num <= 3 {
+		return c.Conn.Write(b)
+	}
+
+	// Writes 4-18: apply mimicry timing delay
 	delay := c.engine.NextDelay()
 	if delay > 0 {
 		time.Sleep(delay)
@@ -570,11 +578,8 @@ func (c *MimicryObfuscationClientConn) Write(b []byte) (int, error) {
 		paddingData[i] ^= xorStream[i]
 	}
 
-	// Apply mimicry timing delay
-	delay := c.engine.NextDelay()
-	if delay > 0 {
-		time.Sleep(delay)
-	}
+	// NOTE: No timing delay here — this is pre-REALITY, delay would break
+	// the TLS handshake. Mimicry timing is applied post-handshake by MimicryConn.
 
 	// Build: [marker(1)] [tag(8)] [masked_padding(1+paddingLen)] [original_data]
 	headerLen := 1 + resonanceTagLen + len(paddingData)

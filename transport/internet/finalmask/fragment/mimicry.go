@@ -1,10 +1,7 @@
 package fragment
 
 import (
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/binary"
 	"math"
 	"net"
 	"sync"
@@ -496,26 +493,25 @@ func (c *MimicryConn) Write(b []byte) (int, error) {
 
 // ==================== Enhanced Obfuscation with Mimicry ====================
 
-// MimicryObfuscationClientConn combines protocol mimicry with obfuscation padding.
-// The first write prepends a protocol-realistic header + mimicry-sized padding
-// instead of simple random bytes.
+// MimicryObfuscationClientConn combines protocol mimicry with V2 obfuscation.
+// The first write uses Resonance Tags + XOR masking + mimicry-shaped padding.
 type MimicryObfuscationClientConn struct {
 	net.Conn
 	mu        sync.Mutex
 	engine    *MimicryEngine
-	magic     byte
+	shortId   string
 	firstDone bool
 }
 
 // NewMimicryObfuscationClientConn creates a client conn that uses mimicry
-// for the obfuscation padding (first write before REALITY handshake).
+// for the obfuscation padding with V2 protocol (resonance tags + XOR masking).
 func NewMimicryObfuscationClientConn(conn net.Conn, shortId string, profile *MimicryProfile, cfg *MimicryConfig) *MimicryObfuscationClientConn {
 	engine := NewMimicryEngine(profile, cfg)
 	engine.SetSeed(shortId)
 	return &MimicryObfuscationClientConn{
-		Conn:   conn,
-		engine: engine,
-		magic:  deriveMagic(shortId),
+		Conn:    conn,
+		engine:  engine,
+		shortId: shortId,
 	}
 }
 
@@ -527,9 +523,9 @@ func (c *MimicryObfuscationClientConn) CloseWrite() error {
 	return c.Conn.Close()
 }
 
-// Write prepends mimicry-shaped padding before the first write.
-// Format: [encoded_len(1)] [protocol_header(0-4)] [random_padding(N)] [original_data]
-// The padding size follows the mimicry profile's size distribution.
+// Write prepends V2 mimicry-shaped obfuscation before the first write.
+// Uses resonance tags + XOR masking. Padding size follows mimicry profile.
+// Format: [0x00] [resonance_tag(8)] [XOR-masked: paddingLen(1) + padding(N)] [data]
 func (c *MimicryObfuscationClientConn) Write(b []byte) (int, error) {
 	c.mu.Lock()
 	if c.firstDone {
@@ -539,9 +535,8 @@ func (c *MimicryObfuscationClientConn) Write(b []byte) (int, error) {
 	c.firstDone = true
 	c.mu.Unlock()
 
-	// Get mimicry-appropriate padding size
+	// Get mimicry-appropriate padding size, clamped to server-decodable range
 	paddingLen := c.engine.NextPaddingSize()
-	// Clamp to valid range for server decoding (32-128)
 	if paddingLen < 32 {
 		paddingLen = 32
 	}
@@ -549,37 +544,49 @@ func (c *MimicryObfuscationClientConn) Write(b []byte) (int, error) {
 		paddingLen = 128
 	}
 
-	// Build header: [encoded_length(1)] [padding(paddingLen)] [original_data]
-	header := make([]byte, 1+paddingLen)
-	header[0] = byte(paddingLen) ^ c.magic
+	tw := currentTimeWindow()
 
-	// Fill padding with protocol-mimicking content
+	// Generate resonance tag
+	tag := generateResonanceTag(c.shortId, tw)
+
+	// Build padding content with protocol-mimicking data
+	paddingData := make([]byte, 1+paddingLen) // paddingLen byte + padding
+	paddingData[0] = byte(paddingLen)
+
+	// Fill padding with protocol template + random
 	tmpl := c.engine.HeaderTemplate()
 	if tmpl != nil && len(tmpl) <= paddingLen {
-		// Put protocol header template at the start of padding
-		copy(header[1:], tmpl)
-		// Fill rest with random
-		rand.Read(header[1+len(tmpl):])
+		copy(paddingData[1:], tmpl)
+		rand.Read(paddingData[1+len(tmpl):])
 	} else {
-		rand.Read(header[1:])
+		rand.Read(paddingData[1:])
 	}
 
-	// Apply mimicry timing delay for the first packet
+	// XOR-mask the entire padding region
+	xorStream := deriveXORStream(c.shortId, tw, len(paddingData))
+	for i := range paddingData {
+		paddingData[i] ^= xorStream[i]
+	}
+
+	// Apply mimicry timing delay
 	delay := c.engine.NextDelay()
 	if delay > 0 {
 		time.Sleep(delay)
 	}
 
-	// Combine and send
-	combined := make([]byte, len(header)+len(b))
-	copy(combined, header)
-	copy(combined[len(header):], b)
+	// Build: [marker(1)] [tag(8)] [masked_padding(1+paddingLen)] [original_data]
+	headerLen := 1 + resonanceTagLen + len(paddingData)
+	combined := make([]byte, headerLen+len(b))
+	combined[0] = obfsV2Marker
+	copy(combined[1:1+resonanceTagLen], tag)
+	copy(combined[1+resonanceTagLen:headerLen], paddingData)
+	copy(combined[headerLen:], b)
 
 	n, err := c.Conn.Write(combined)
-	if n <= len(header) {
+	if n <= headerLen {
 		return 0, err
 	}
-	return n - len(header), err
+	return n - headerLen, err
 }
 
 // ==================== Mimicry Registry ====================
@@ -619,22 +626,4 @@ func GetGlobalMimicry() *MimicryConfig {
 	return mimicryGlobalConfig
 }
 
-// ==================== HMAC-based Resonance Tags ====================
-
-// GenerateResonanceTag creates an 8-byte session tag that rotates every tagWindow.
-// Both client and server generate the same tag because they share the shortId.
-// This replaces plaintext shortId exposure in the padding.
-func GenerateResonanceTag(shortId string, tagWindow time.Duration) []byte {
-	if tagWindow <= 0 {
-		tagWindow = 10 * time.Second
-	}
-	counter := uint64(time.Now().Unix()) / uint64(tagWindow.Seconds())
-	counterBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(counterBytes, counter)
-
-	key := sha256.Sum256([]byte("resonance-tag:" + shortId))
-	mac := hmac.New(sha256.New, key[:])
-	mac.Write(counterBytes)
-	tag := mac.Sum(nil)
-	return tag[:8]
-}
+// Note: Resonance tag generation moved to obfuscation.go (V2 protocol).

@@ -188,6 +188,24 @@ func GetMimicryProfile(name string) *MimicryProfile {
 	return knownProfiles[name]
 }
 
+// mimicryPaddingPool reuses small buffers (1+paddingLen, up to 129 bytes)
+// for MimicryObfuscationClientConn.Write obfuscation padding.
+// Capped at 256 bytes to cover any clamped paddingLen (32-128) + 1.
+var mimicryPaddingPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 256)
+		return &b
+	},
+}
+
+// mimicryHeaderPool reuses small buffers for HeaderTemplate copies (≤8 bytes typical).
+var mimicryHeaderPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 16)
+		return &b
+	},
+}
+
 // ==================== Mimicry Engine ====================
 
 // MimicryEngine generates packet sizes and timing delays according to a profile.
@@ -314,14 +332,22 @@ func (e *MimicryEngine) NextDelay() time.Duration {
 }
 
 // HeaderTemplate returns the protocol-specific header bytes for the current profile.
-func (e *MimicryEngine) HeaderTemplate() []byte {
+// Returns a pooled slice — caller must return it via mimicryHeaderPool.Put when done.
+// Returns (nil, nil) if no template.
+func (e *MimicryEngine) HeaderTemplate() ([]byte, *[]byte) {
 	if e.profile.HeaderTemplate == nil {
-		return nil
+		return nil, nil
 	}
-	// Copy to avoid mutation
-	h := make([]byte, len(e.profile.HeaderTemplate))
+	tLen := len(e.profile.HeaderTemplate)
+	poolPtr := mimicryHeaderPool.Get().(*[]byte)
+	h := *poolPtr
+	if cap(h) < tLen {
+		h = make([]byte, tLen)
+		*poolPtr = h
+	}
+	h = h[:tLen]
 	copy(h, e.profile.HeaderTemplate)
-	return h
+	return h, poolPtr
 }
 
 // RecordWrite records a write for DPI detection analysis.
@@ -637,12 +663,22 @@ func (c *MimicryObfuscationClientConn) Write(b []byte) (int, error) {
 	// Generate resonance tag
 	tag := generateResonanceTag(c.shortId, tw)
 
-	// Build padding content with protocol-mimicking data
-	paddingData := make([]byte, 1+paddingLen) // paddingLen byte + padding
+	// Build padding content with protocol-mimicking data — use pooled buffer
+	padSize := 1 + paddingLen
+	padPoolPtr := mimicryPaddingPool.Get().(*[]byte)
+	paddingBuf := *padPoolPtr
+	if cap(paddingBuf) < padSize {
+		paddingBuf = make([]byte, padSize)
+		*padPoolPtr = paddingBuf
+	}
+	paddingData := paddingBuf[:padSize]
 	paddingData[0] = byte(paddingLen)
 
 	// Fill padding with protocol template + random
-	tmpl := c.engine.HeaderTemplate()
+	tmpl, tmplPoolPtr := c.engine.HeaderTemplate()
+	if tmplPoolPtr != nil {
+		defer mimicryHeaderPool.Put(tmplPoolPtr)
+	}
 	if tmpl != nil && len(tmpl) <= paddingLen {
 		copy(paddingData[1:], tmpl)
 		rand.Read(paddingData[1+len(tmpl):])
@@ -661,13 +697,40 @@ func (c *MimicryObfuscationClientConn) Write(b []byte) (int, error) {
 
 	// Build: [marker(1)] [tag(8)] [masked_padding(1+paddingLen)] [original_data]
 	headerLen := 1 + resonanceTagLen + len(paddingData)
-	combined := make([]byte, headerLen+len(b))
+	totalLen := headerLen + len(b)
+
+	// For the combined buffer we write header+padding inline and append data.
+	// This is a one-shot per connection (firstDone gate), so allocation pressure
+	// is low, but we still avoid it where the buffer fits in the padding pool.
+	var combined []byte
+	var combinedPoolPtr *[]byte
+	if totalLen <= 256 {
+		combinedPoolPtr = mimicryPaddingPool.Get().(*[]byte)
+		cb := *combinedPoolPtr
+		if cap(cb) < totalLen {
+			cb = make([]byte, totalLen)
+			*combinedPoolPtr = cb
+		}
+		combined = cb[:totalLen]
+	} else {
+		combined = make([]byte, totalLen)
+	}
+
 	combined[0] = obfsV2Marker
 	copy(combined[1:1+resonanceTagLen], tag)
 	copy(combined[1+resonanceTagLen:headerLen], paddingData)
 	copy(combined[headerLen:], b)
 
+	// Return padding buffer to pool
+	mimicryPaddingPool.Put(padPoolPtr)
+
 	n, err := c.Conn.Write(combined)
+
+	// Return combined buffer if pooled
+	if combinedPoolPtr != nil {
+		mimicryPaddingPool.Put(combinedPoolPtr)
+	}
+
 	if n <= headerLen {
 		return 0, err
 	}

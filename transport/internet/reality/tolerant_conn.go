@@ -75,3 +75,12 @@ func (t *tolerantReadConn) Read(p []byte) (int, error) {
 
 	return 0, errors.New("reality: too many leading empty handshake records")
 }
+
+// CloseWrite implements the CloseWriteConn interface required by REALITY
+// and ObfuscationConn. Delegates to the underlying connection.
+func (t *tolerantReadConn) CloseWrite() error {
+	if cw, ok := t.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}

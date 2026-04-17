@@ -2,10 +2,22 @@ package fragment
 
 import (
 	"net"
+	"sync"
 	"time"
 
 	"github.com/xtls/xray-core/common/crypto"
 )
+
+// fragmentBufferPool reuses 2048-byte scratch buffers for TLS record
+// fragmentation in fragmentClientHello, avoiding per-Write heap allocations.
+// On iOS NetworkExtension (50 MB jetsam), this reduces transient heap churn
+// from ~2 KB per Write() to near zero for the hot path.
+var fragmentBufferPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 2048)
+		return &b
+	},
+}
 
 type fragmentConn struct {
 	net.Conn
@@ -125,7 +137,9 @@ func (c *fragmentConn) fragmentClientHello(p []byte) (int, error) {
 	// Each fragment gets its own 5-byte TLS record header (same type + version).
 	// Around the SNI area, use tiny 1-2 byte fragments to make SNI extraction
 	// impossible without full reassembly with buffering.
-	buff := make([]byte, 2048)
+	buffPtr := fragmentBufferPool.Get().(*[]byte)
+	buff := *buffPtr
+	defer fragmentBufferPool.Put(buffPtr)
 	for from := 0; from < len(data); {
 		var chunkSize int
 
@@ -148,6 +162,7 @@ func (c *fragmentConn) fragmentClientHello(p []byte) (int, error) {
 
 		l := to - from
 		if 5+l > len(buff) {
+			// Rare: oversized ClientHello exceeds 2048. Allocate one-off.
 			buff = make([]byte, 5+l)
 		}
 		// Copy TLS record header: type + version from original
